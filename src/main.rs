@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -315,14 +315,26 @@ async fn main() {
     }
 }
 
+fn canonicalize_boundary(path: &Path) -> PathBuf {
+    if let Ok(canonical) = dunce::canonicalize(path) {
+        return canonical;
+    }
+    if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name())
+        && let Ok(canonical_parent) = dunce::canonicalize(parent)
+    {
+        return canonical_parent.join(file_name);
+    }
+    path.to_path_buf()
+}
+
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let mut config = AppConfig::load(cli.config)?;
     if let Some(data_dir) = cli.data_dir {
-        config.data_dir = data_dir;
+        config.data_dir = canonicalize_boundary(&data_dir);
     }
     if let Some(workspace) = cli.workspace {
-        config.workspace = workspace;
+        config.workspace = canonicalize_boundary(&workspace);
     }
     if let Some(provider) = cli.provider {
         config.provider = match provider.as_str() {
@@ -369,8 +381,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         if info.state != WorktreeState::Active {
             return Err(format!("managed worktree is not active: {name}").into());
         }
-        config.workspace = info.path;
+        config.workspace = canonicalize_boundary(&info.path);
     }
+    config.workspace = canonicalize_boundary(&config.workspace);
+    config.data_dir = canonicalize_boundary(&config.data_dir);
     match cli.command {
         Command::Context {
             command: ContextCommand::Map,
