@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+  RUST_BACKTRACE: full
 
 jobs:
   fmt:
@@ -48,4 +48,4 @@ jobs:
             ~/.cargo/git
           key: test-v2-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo build --locked
-      - run: cargo test --locked
+      - run: cargo test --locked -- --test-threads=1
