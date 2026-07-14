@@ -1709,7 +1709,9 @@ fn render(frame: &mut Frame<'_>, app: &App) {
             theme::dim(),
         ));
     }
-    if app.running && let Some(started) = app.run_started {
+    if app.running
+        && let Some(started) = app.run_started
+    {
         let secs = started.elapsed().as_secs();
         header_spans.push(Span::styled("  │  ", theme::dim()));
         header_spans.push(Span::styled(
