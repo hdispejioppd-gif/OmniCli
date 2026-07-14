@@ -48,6 +48,18 @@ jobs:
             ~/.cargo/git
           key: test-v2-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo build --locked
+      - name: Canonical temp (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\t | Out-Null
+          Add-Content $env:GITHUB_ENV "TEMP=C:\t"
+          Add-Content $env:GITHUB_ENV "TMP=C:\t"
+      - name: Canonical temp (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p /private/tmp/omni-t
+          echo "TMPDIR=/private/tmp/omni-t/" >> "$GITHUB_ENV"
       - name: Run tests
         shell: bash
         run: |
