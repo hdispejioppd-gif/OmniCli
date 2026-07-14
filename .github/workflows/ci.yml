@@ -28,8 +28,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: clippy-${{ hashFiles('**/Cargo.lock') }}
+          key: clippy-v2-${{ hashFiles('**/Cargo.lock') }}
       - run: rustup component add clippy
       - run: cargo clippy --all-targets
 
@@ -47,7 +46,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: test-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: test-v2-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo build --locked
-      - run: cargo test --locked -- --nocapture
+      - run: cargo test --locked
