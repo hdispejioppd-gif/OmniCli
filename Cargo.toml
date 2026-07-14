@@ -1,0 +1,65 @@
+[package]
+name = "omnicli"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Open-source, provider-neutral agentic CLI runtime"
+
+[lib]
+name = "omnicli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "omni"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+async-stream = "0.3"
+cap-std = "3.4"
+clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = "4.5"
+directories = "6"
+crossterm = { version = "0.29", features = ["event-stream"] }
+eventsource-stream = "0.2"
+futures-util = "0.3"
+hex = "0.4"
+ignore = "0.4"
+lsp-types = "0.97"
+pulldown-cmark = "0.12"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+sha2 = "0.10"
+similar = "2"
+streaming-iterator = "0.1"
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
+tantivy = "0.22"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.9"
+tree-sitter = "0.24"
+tree-sitter-go = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+uuid = { version = "1", features = ["v7"] }
+unicode-segmentation = "1.13"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+wiremock = "0.6"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

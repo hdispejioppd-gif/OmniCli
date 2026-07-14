@@ -1,0 +1,17 @@
+version: 1
+
+steps:
+  - id: status
+    tool: git_status
+    arguments: {}
+
+  - id: manifest
+    tool: read_file
+    arguments:
+      path: Cargo.toml
+
+  - id: readme
+    tool: read_file
+    arguments:
+      path: README.md
+    needs: [status, manifest]

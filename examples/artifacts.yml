@@ -1,0 +1,9 @@
+version: 2
+
+steps:
+  - id: inspect_manifest
+    tool: read_file
+    arguments:
+      path: Cargo.toml
+    artifacts:
+      - Cargo.toml

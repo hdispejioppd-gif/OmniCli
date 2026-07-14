@@ -1,0 +1,10 @@
+/target/
+/.omni/
+*.db
+*.db-shm
+*.db-wal
+.env
+.obsidian/
+__pycache__/
+*.pyc
+docs/.obsidian/

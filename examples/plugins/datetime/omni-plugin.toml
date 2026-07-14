@@ -1,0 +1,8 @@
+[plugin]
+name = "datetime"
+version = "0.1.0"
+description = "Provides current date and time tools"
+entrypoint = "datetime_plugin.py"
+
+[permissions]
+read = true

@@ -1,0 +1,12 @@
+version: 1
+
+tasks:
+  - id: backend
+    worktree: backend
+    prompt: Inspect the backend branch and make the smallest verified repair.
+    verify: true
+
+  - id: frontend
+    worktree: frontend
+    prompt: Inspect the frontend branch and make the smallest verified repair.
+    verify: true
