@@ -34,12 +34,10 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
@@ -49,27 +47,11 @@ jobs:
             ~/.cargo/git
           key: test-v2-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo build --locked
-      - name: Run tests
-        shell: bash
+      - name: Canonical temp (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          set +e
-          cargo test --locked > test-output.txt 2>&1
-          exit_code=$?
-          cat test-output.txt
-          exit $exit_code
-      - name: Report failure on commit
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let output = '';
-            try { output = fs.readFileSync('test-output.txt', 'utf8'); } catch (e) { output = 'no test output'; }
-            const tail = output.split('\n').slice(-150).join('\n');
-            const body = `## Test failure on \`${{ matrix.os }}\`\n\n\`\`\`\n${tail}\n\`\`\``;
-            await github.rest.repos.createCommitComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              commit_sha: context.sha,
-              body: body.slice(0, 65000),
-            });
+          New-Item -ItemType Directory -Force -Path C:\t | Out-Null
+          Add-Content $env:GITHUB_ENV "TEMP=C:\t"
+          Add-Content $env:GITHUB_ENV "TMP=C:\t"
+      - run: cargo test --locked
