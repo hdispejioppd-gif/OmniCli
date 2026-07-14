@@ -72,7 +72,7 @@ pub enum ContextError {
 
 impl ContextEngine {
     pub fn index(workspace: PathBuf) -> Result<Self, ContextError> {
-        let canonical = fs::canonicalize(&workspace)?;
+        let canonical = dunce::canonicalize(&workspace)?;
         if !canonical.is_dir() {
             return Err(ContextError::NotADirectory(canonical));
         }

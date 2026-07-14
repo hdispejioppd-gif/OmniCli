@@ -760,8 +760,8 @@ async fn verify_repository_root(context: &ToolContext) -> Result<(), ToolError> 
         return Err(ToolError::Git(captured.stderr_text()));
     }
     let reported = PathBuf::from(captured.stdout_text().trim());
-    let workspace = std::fs::canonicalize(&context.workspace)?;
-    let reported = std::fs::canonicalize(reported)?;
+    let workspace = dunce::canonicalize(&context.workspace)?;
+    let reported = dunce::canonicalize(reported)?;
     if workspace != reported {
         return Err(ToolError::Git(
             "workspace must be the Git repository root".into(),
@@ -934,9 +934,9 @@ fn validate_relative_path(path: &Path) -> Result<(), ToolError> {
 
 fn existing_regular_file(workspace: &Path, relative: &Path) -> Result<PathBuf, ToolError> {
     validate_relative_path(relative)?;
-    let root = std::fs::canonicalize(workspace)?;
+    let root = dunce::canonicalize(workspace)?;
     let candidate = reject_link_components(&root, relative, true)?;
-    let canonical = std::fs::canonicalize(&candidate)?;
+    let canonical = dunce::canonicalize(&candidate)?;
     if !canonical.starts_with(&root) {
         return Err(ToolError::Path(
             "resolved path escapes the workspace".into(),
@@ -950,10 +950,10 @@ fn existing_regular_file(workspace: &Path, relative: &Path) -> Result<PathBuf, T
 
 fn new_file_path(workspace: &Path, relative: &Path) -> Result<PathBuf, ToolError> {
     validate_relative_path(relative)?;
-    let root = std::fs::canonicalize(workspace)?;
+    let root = dunce::canonicalize(workspace)?;
     let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
     let parent = reject_link_components(&root, parent_relative, true)?;
-    let parent = std::fs::canonicalize(parent)?;
+    let parent = dunce::canonicalize(parent)?;
     if !parent.starts_with(&root) || !parent.is_dir() {
         return Err(ToolError::Path("parent is outside the workspace".into()));
     }

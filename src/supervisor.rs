@@ -117,7 +117,7 @@ impl SupervisorRuntime {
         shell_timeout: Duration,
     ) -> Result<Self, SupervisorError> {
         Ok(Self {
-            root_workspace: std::fs::canonicalize(root_workspace)?,
+            root_workspace: dunce::canonicalize(root_workspace)?,
             store,
             worktrees,
             provider_factory,
@@ -215,7 +215,7 @@ impl SupervisorRuntime {
             if info.state != WorktreeState::Active || info.dirty != Some(false) {
                 return Err(SupervisorError::WorktreeNotClean(task.worktree));
             }
-            let workspace = std::fs::canonicalize(info.path)?;
+            let workspace = dunce::canonicalize(info.path)?;
             let key = normalized_path(&workspace);
             if !workspace_keys.insert(key.clone()) {
                 return Err(SupervisorError::DuplicateWorktree(task.worktree));
@@ -443,8 +443,8 @@ async fn load_supervisor(
     file: &Path,
 ) -> Result<SupervisorDocument, SupervisorError> {
     validate_relative(file)?;
-    let root = tokio::fs::canonicalize(workspace).await?;
-    let path = tokio::fs::canonicalize(root.join(file)).await?;
+    let root = dunce::canonicalize(workspace)?;
+    let path = dunce::canonicalize(root.join(file))?;
     if !path.starts_with(&root) {
         return Err(SupervisorError::Path);
     }
@@ -518,7 +518,7 @@ fn validate_relative(path: &Path) -> Result<(), SupervisorError> {
 }
 
 fn normalized_path(path: &Path) -> String {
-    let value = path.to_string_lossy().replace("\\\\?\\", "");
+    let value = path.to_string_lossy().to_string();
     if cfg!(windows) {
         value.to_ascii_lowercase()
     } else {

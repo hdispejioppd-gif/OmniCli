@@ -286,12 +286,12 @@ impl WorktreeManager {
         let common = self
             .git_stdout(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .await?;
-        let anchor = std::fs::canonicalize(&self.anchor)?;
-        let top = std::fs::canonicalize(top.trim())?;
+        let anchor = dunce::canonicalize(&self.anchor)?;
+        let top = dunce::canonicalize(top.trim())?;
         if !paths_equal(&anchor, &top) {
             return Err(WorktreeError::NotRoot);
         }
-        let common_dir = std::fs::canonicalize(common.trim())?;
+        let common_dir = dunce::canonicalize(common.trim())?;
         let identity = normalized_identity(&common_dir);
         let repo_id = hex::encode(Sha256::digest(identity.as_bytes()))[..32].to_string();
         let root = self.data_dir.join("worktrees").join("v1").join(&repo_id);
@@ -792,7 +792,7 @@ fn absolutize(path: &Path) -> Result<PathBuf, WorktreeError> {
 }
 
 fn normalized_identity(path: &Path) -> String {
-    let value = path.to_string_lossy().replace("\\\\?\\", "");
+    let value = path.to_string_lossy().to_string();
     if cfg!(windows) {
         value.to_ascii_lowercase()
     } else {
@@ -801,8 +801,8 @@ fn normalized_identity(path: &Path) -> String {
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
-    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
-    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    let left = dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
     normalized_identity(&left) == normalized_identity(&right)
 }
 

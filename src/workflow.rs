@@ -93,19 +93,15 @@ pub async fn load_workflow(
     path: &Path,
 ) -> Result<WorkflowDocument, WorkflowError> {
     validate_relative_path(path)?;
-    let root = tokio::fs::canonicalize(workspace)
-        .await
-        .map_err(|source| WorkflowError::Read {
-            path: workspace.to_path_buf(),
-            source,
-        })?;
+    let root = dunce::canonicalize(workspace).map_err(|source| WorkflowError::Read {
+        path: workspace.to_path_buf(),
+        source,
+    })?;
     let candidate = root.join(path);
-    let canonical = tokio::fs::canonicalize(&candidate)
-        .await
-        .map_err(|source| WorkflowError::Read {
-            path: candidate.clone(),
-            source,
-        })?;
+    let canonical = dunce::canonicalize(&candidate).map_err(|source| WorkflowError::Read {
+        path: candidate.clone(),
+        source,
+    })?;
     if !canonical.starts_with(&root) {
         return Err(WorkflowError::Path(
             "workflow file resolves outside the workspace".into(),
@@ -384,7 +380,7 @@ impl WorkflowRuntime {
         context: ToolContext,
     ) -> Result<Self, WorkflowError> {
         let canonical_workspace =
-            std::fs::canonicalize(&workspace).map_err(|source| WorkflowError::Read {
+            dunce::canonicalize(&workspace).map_err(|source| WorkflowError::Read {
                 path: workspace.clone(),
                 source,
             })?;
@@ -463,12 +459,11 @@ impl WorkflowRuntime {
     ) -> Result<PreparedWorkflow, WorkflowError> {
         validate_concurrency(concurrency)?;
         let record = self.inspect_run(run_id)?;
-        let record_workspace = std::fs::canonicalize(&record.workspace_path).map_err(|source| {
-            WorkflowError::Read {
+        let record_workspace =
+            dunce::canonicalize(&record.workspace_path).map_err(|source| WorkflowError::Read {
                 path: PathBuf::from(&record.workspace_path),
                 source,
-            }
-        })?;
+            })?;
         if record_workspace != self.canonical_workspace {
             return Err(WorkflowError::WorkspaceChanged);
         }
