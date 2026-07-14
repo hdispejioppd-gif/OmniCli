@@ -1,39 +1,36 @@
-# OmniCLI
+# ◆ OmniCLI
 
-OmniCLI is a provider-neutral foundation for an open-source agentic command-line platform. The first vertical slice includes a deterministic model provider, typed tools, explicit permissions, SQLite-backed sessions, and a versioned NDJSON event stream.
+**Open-source, provider-neutral agentic CLI runtime** — chat, typed tools, DAG workflows, parallel agents, and managed Git worktrees, all in a fast terminal UI.
 
-## Build
+`Rust 1.94 · edition 2024 · Apache-2.0 · ratatui TUI · SQLite-backed`
+
+---
+
+## Why omni
+
+- **Provider-neutral by design.** One runtime, many models: `fake` (deterministic, offline), OpenAI, Anthropic, Ollama — plus LM Studio, llama.cpp, and generic OpenAI-compatible endpoints. Switch models mid-session without losing state.
+- **Beautiful, fast TUI.** A cohesive dark truecolor theme, rounded panels, animated status spinner, speaker-labelled transcript, syntax-highlighted markdown and code, live workflow DAG dashboard — redrawn at 30 fps.
+- **Security first, not bolted on.** Every capability (write, shell, MCP, plugins, worktrees) is denied by default and granted per run or per call. Path escapes are hard denials that never reach a prompt.
+- **Everything is journaled.** Sessions, messages, workflow runs, and events live in SQLite with a versioned NDJSON event stream — resumable, inspectable, machine-readable with `--json`.
+- **Parallel by default.** Independent workflow steps run concurrently; the supervisor fans out whole agents across isolated Git worktrees.
+
+## Quick start
 
 ```powershell
 cargo build
 cargo test
-```
 
-## Use
-
-```powershell
-cargo run -- doctor
-cargo run -- run "hello"
+cargo run -- doctor            # environment check
+cargo run -- tui               # interactive TUI
+cargo run -- run "hello"       # one-shot agent run
 cargo run -- --json run "hello"
-cargo run -- --provider openai --model gpt-4.1-mini run "inspect this project"
-cargo run -- run "read README.md"
-cargo run -- run --allow-write "write notes.txt::hello"
-cargo run -- run "status"
-cargo run -- run "diff"
-cargo run -- run --verify "checks"
-cargo run -- ask "explain the agent loop"
-cargo run -- plan "add OAuth login"
-cargo run -- review --verify
-cargo run -- run --allow-shell "shell git status"
-cargo run -- run --allow-plugins "plugin plugin__datetime__now::{}"
-cargo run -- plugins list
-cargo run -- sessions list
 ```
 
 The built-in `fake` provider is deterministic and intentionally small. Prompts beginning with `read`, `write`, `patch`, `status`, `diff`, `checks`, `shell`, or `plugin` exercise the complete provider-to-tool execution loop without network credentials.
- The `openai` provider supports compatible `/chat/completions` APIs, true SSE streaming, fragmented tool calls, cancellation, and resumable tool history.
 
-Set credentials through the environment only:
+### Real providers
+
+Set credentials through the environment only — omni never stores keys:
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
@@ -45,6 +42,55 @@ cargo run -- --provider anthropic --model "claude-sonnet-4-20250514" run "hello"
 # Ollama — local, no API key required
 cargo run -- --provider ollama --model "llama3.1" --base-url "http://localhost:11434" run "hello"
 ```
+
+The `openai` provider supports compatible `/chat/completions` APIs, true SSE streaming, fragmented tool calls, cancellation, and resumable tool history.
+
+## Terminal UI
+
+```powershell
+omni tui
+omni --provider openai --model gpt-4.1-mini tui
+omni tui --session 019f...
+omni tui --allow-mcp-start
+```
+
+The TUI streams model output, preserves and continues SQLite sessions, shows live tool activity with status glyphs (◌ requested · ◔ awaiting · ◐ running · ● done · ✖ failed), and asks for one-time `y/n` approval before valid write, shell, validation, or MCP calls that were not preauthorized. Invalid and escaping paths remain hard denials and never reach the modal.
+
+### Keybindings
+
+| Key | Action |
+| --- | --- |
+| `Enter` / `Ctrl+S` | Submit a task while idle |
+| `Alt+Enter` | Insert a new line |
+| `Esc` | Cancel the active run, clear input, or exit |
+| `Ctrl+Q` | Cancel and exit |
+| `y` / `n` | Resolve a permission prompt |
+| `Ctrl+P` | Model picker |
+| `Ctrl+L` | Session picker |
+| `Ctrl+N` | New session |
+| `Ctrl+W` | Workflow dashboard |
+| `Ctrl+T` | Supervisor dashboard |
+| `PageUp` / `PageDown` | Scroll the transcript |
+| `End` | Follow the latest output |
+
+### Slash commands
+
+```text
+/workflows
+/workflow run examples/inspect.yml
+/workflow resume 019f...
+/supervisors
+/supervisor run tasks.yml
+/models
+/model fake
+/model openai/gpt-4.1-mini
+```
+
+The workflow dashboard polls the SQLite journal while a local workflow is active and shows step status, tool, attempts, and dependency edges. `Tab` or `Right` focuses steps; the selected step displays declared/captured artifacts, complete SHA-256 values, errors, and bounded stdout/stderr. Use `r` to resume the selected run, `n` to prepare a new workflow path, `c` to cancel the workflow owned by this TUI, and `Ctrl+R` to refresh persisted state.
+
+Model switching is allowed only while idle and keeps the current SQLite session, transcript, tools, and workflow runtime. The picker exposes only configured selectors; it never accepts API keys or arbitrary endpoint URLs. A failed provider construction leaves the active model unchanged.
+
+TUI mode requires interactive stdin and stdout. `--json tui` and redirected terminals are rejected before raw mode begins.
 
 ## Configuration
 
@@ -88,39 +134,25 @@ cargo run -- --profile offline doctor
 cargo run -- --profile ci --json run "status"
 ```
 
-CLI flags override path settings. Writes and shell execution are denied unless explicitly enabled for the run.
+CLI flags override path settings.
 
-`read_file` returns the complete file SHA-256 in tool metadata. Existing files can only be changed through `apply_patch`, which requires that hash and one unique exact text match. New files use `create_file`, which refuses to overwrite an existing path. `git_status` and `git_diff` are fixed read-only operations and do not require shell permission.
+## Permissions & safety model
 
-`--verify` grants only the fixed `run_checks` capability. It detects root Rust, Node, and Python projects and runs bounded checks with direct argv execution. After a successful workspace edit, the agent validates automatically; failed output is returned to the model for another repair turn. Automated repairs still require `--allow-write`, and arbitrary shell remains separately gated by `--allow-shell`.
-
-## MCP
-
-OmniCLI can import tools from MCP stdio processes. Process startup and remote calls are separate permissions:
-
-```toml
-[mcp]
-max_message_bytes = 1048576
-
-[mcp.servers.local]
-command = "C:/absolute/path/to/mcp-server.exe"
-args = []
-env = ["MCP_TOKEN"]
-startup_timeout_seconds = 10
-call_timeout_seconds = 30
-```
-
-Only environment variable names are stored; values are read at process startup. MCP children receive a cleared environment plus explicitly listed variables.
+Writes and shell execution are denied unless explicitly enabled for the run:
 
 ```powershell
-omni run --allow-mcp-start --allow-mcp-call "use the imported tools"
-omni mcp serve
-omni mcp serve --allow-write --verify
+cargo run -- run --allow-write "write notes.txt::hello"
+cargo run -- run --allow-shell "shell git status"
+cargo run -- run --allow-plugins "plugin plugin__datetime__now::{}"
 ```
 
-Imported names use `mcp__<server>__<tool>`. `--allow-mcp-start` authorizes configured executables, while `--allow-mcp-call` separately authorizes model-generated arguments leaving through those tools. Server mode exports built-in tools and reapplies its own local write, shell, and validation policy.
+- `read_file` returns the complete file SHA-256 in tool metadata.
+- Existing files can only be changed through `apply_patch`, which requires that hash and one unique exact text match.
+- New files use `create_file`, which refuses to overwrite an existing path.
+- `git_status` and `git_diff` are fixed read-only operations and do not require shell permission.
+- `--verify` grants only the fixed `run_checks` capability. It detects root Rust, Node, and Python projects and runs bounded checks with direct argv execution. After a successful workspace edit, the agent validates automatically; failed output is returned to the model for another repair turn. Automated repairs still require `--allow-write`, and arbitrary shell remains separately gated by `--allow-shell`.
 
-## Read-only modes
+### Read-only modes
 
 `ask`, `plan`, and `review` run with a system prompt and a restrictive policy. Writes, shell, MCP, and worktree mutations are denied by default; `--verify` is optional for `review`.
 
@@ -150,16 +182,6 @@ Agents can also call `search_files` directly:
 ```powershell
 cargo run -- run "search authentication"
 ```
-
-## Introspection
-
-```powershell
-cargo run -- models
-cargo run -- tools
-cargo run -- --json tools
-```
-
-`models` lists configured selectors. `tools` lists every tool available to the active agent with its JSON schema.
 
 ## Workflows
 
@@ -202,6 +224,8 @@ Every run receives a UUIDv7 and is journaled incrementally in SQLite. `workflow 
 
 Retry policies are fixed and bounded to 10 attempts with a maximum delay of 60 seconds. Only tool execution failures are retried automatically; invalid arguments and permission denials fail immediately. Incomplete side-effecting steps use at-least-once semantics after a process crash.
 
+### Artifacts (workflow v2)
+
 Workflow version 2 can require file artifacts from successful steps:
 
 ```yaml
@@ -216,6 +240,32 @@ steps:
 ```
 
 Artifact paths are workspace-relative, bounded, and opened through a capability directory. Symbolic links and escaping paths are rejected. Reports persist only path, byte count, and SHA-256 metadata. A missing or invalid declared artifact fails the step even when its tool succeeded.
+
+## MCP
+
+OmniCLI can import tools from MCP stdio processes. Process startup and remote calls are separate permissions:
+
+```toml
+[mcp]
+max_message_bytes = 1048576
+
+[mcp.servers.local]
+command = "C:/absolute/path/to/mcp-server.exe"
+args = []
+env = ["MCP_TOKEN"]
+startup_timeout_seconds = 10
+call_timeout_seconds = 30
+```
+
+Only environment variable names are stored; values are read at process startup. MCP children receive a cleared environment plus explicitly listed variables.
+
+```powershell
+omni run --allow-mcp-start --allow-mcp-call "use the imported tools"
+omni mcp serve
+omni mcp serve --allow-write --verify
+```
+
+Imported names use `mcp__<server>__<tool>`. `--allow-mcp-start` authorizes configured executables, while `--allow-mcp-call` separately authorizes model-generated arguments leaving through those tools. Server mode exports built-in tools and reapplies its own local write, shell, and validation policy.
 
 ## Plugins
 
@@ -278,49 +328,7 @@ omni run --allow-plugins "use plugin__datetime__now"
 
 Plugin tool names are namespaced as `plugin__<plugin>__<tool>`. The fake provider supports `plugin <tool>::<json-arguments>` for testing.
 
-## Terminal UI
-
-Launch the interactive TUI with the configured provider:
-
-```powershell
-omni tui
-omni --provider openai --model gpt-4.1-mini tui
-omni tui --session 019f...
-omni tui --allow-mcp-start
-```
-
-The TUI streams model output, preserves and continues SQLite sessions, shows tool activity, and asks for one-time `y/n` approval before valid write, shell, validation, or MCP calls that were not preauthorized. Invalid and escaping paths remain hard denials and never reach the modal.
-
-Keybindings:
-
-- `Enter` / `Ctrl+S`: submit a task while idle
-- `Alt+Enter`: insert a new line
-- `Esc`: cancel the active run, clear input, or exit
-- `Ctrl+Q`: cancel and exit
-- `y` / `n`: resolve a permission prompt
-- `Ctrl+L`: open the SQLite session picker
-- `Ctrl+P`: open the configured model picker
-- `Ctrl+N`: start a new session
-- `Ctrl+W`: open the persisted workflow dashboard
-- `PageUp` / `PageDown`: scroll the transcript
-- `End`: follow the latest output
-
-Workflow commands can run inside the TUI without leaving the terminal:
-
-```text
-/workflows
-/workflow run examples/inspect.yml
-/workflow resume 019f...
-/models
-/model fake
-/model openai/gpt-4.1-mini
-```
-
-The dashboard polls the SQLite journal while a local workflow is active and shows step status, tool, attempts, and dependency edges. `Tab` or `Right` focuses steps; the selected step displays declared/captured artifacts, complete SHA-256 values, errors, and bounded stdout/stderr. Use `r` to resume the selected run, `n` to prepare a new workflow path, `c` to cancel the workflow owned by this TUI, and `Ctrl+R` to refresh persisted state.
-
-Model switching is allowed only while idle and keeps the current SQLite session, transcript, tools, and workflow runtime. The picker exposes only configured selectors; it never accepts API keys or arbitrary endpoint URLs. A failed provider construction leaves the active model unchanged.
-
-## Managed Worktrees
+## Managed worktrees
 
 OmniCLI creates linked Git worktrees under an external deterministic data directory and generates branches as `omni/<name>`:
 
@@ -338,7 +346,7 @@ The manager stores ownership metadata outside the checkout, disables hooks, reje
 
 The configured `data_dir` must be outside the repository and Git common directory for worktree operations. `HEAD` must resolve to an existing commit. Unknown or unmanaged paths cannot be selected through `--worktree`.
 
-## Parallel Agent Supervisor
+## Parallel agent supervisor
 
 The supervisor runs independent agents concurrently in different managed worktrees:
 
@@ -364,17 +372,35 @@ Each task receives its own Agent, ToolContext, cancellation token, and SQLite se
 
 Inside the TUI, use `Ctrl+T`, `/supervisors`, or `/supervisor run tasks.yml` to view persisted batches, live task states, worktree names, errors, and session IDs.
 
-TUI mode requires interactive stdin and stdout. `--json tui` and redirected terminals are rejected before raw mode begins.
+## Introspection
+
+```powershell
+cargo run -- models
+cargo run -- tools
+cargo run -- --json tools
+```
+
+`models` lists configured selectors. `tools` lists every tool available to the active agent with its JSON schema.
 
 ## Architecture
 
-- `agent`: provider-neutral orchestration and verification loop
-- `provider`: model contract with fake, OpenAI, Anthropic and Ollama adapters
-- `tools`: bounded process execution, atomic file tools, safe Git inspection, shell, and plugin tools
-- `plugin`: subprocess plugin host with JSON-RPC stdio protocol
-- `permission`: centralized capability policy
-- `store`: SQLite sessions, messages, and event journal
-- `events`: versioned execution protocol
-- `config`: typed configuration and project defaults
+- `agent` — provider-neutral orchestration and verification loop
+- `provider` — model contract with fake, OpenAI, Anthropic and Ollama adapters
+- `tools` — bounded process execution, atomic file tools, safe Git inspection, shell, and plugin tools
+- `plugin` — subprocess plugin host with JSON-RPC stdio protocol
+- `permission` — centralized capability policy
+- `store` — SQLite sessions, messages, and event journal
+- `events` — versioned execution protocol
+- `config` — typed configuration and project defaults
+- `theme` — truecolor design system for the TUI (palette, panels, styles)
+- `tui` / `tui_markdown` / `diffview` — terminal UI, markdown renderer, interactive diff review
+
+See `docs/` for architecture notes, the full command reference, provider details, and decision journal.
+
+## Roadmap
 
 Upcoming vertical slices add LM Studio, llama.cpp and generic OpenAI-compatible adapters, workflow artifact views, additional plugin SDKs, and structured-output adapters.
+
+## License
+
+Apache-2.0

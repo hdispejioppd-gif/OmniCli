@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Open-source, provider-neutral agentic CLI runtime"
+repository = "https://github.com/hdispejioppd-gif/OmniCli"
+readme = "README.md"
+keywords = ["cli", "ai", "agent", "tui", "llm"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 name = "omnicli"
@@ -60,6 +64,7 @@ wiremock = "0.6"
 [profile.release]
 lto = "thin"
 strip = true
+codegen-units = 1
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

@@ -6,6 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use omnicli::tui::{TuiOptions, permission_bridge, run_tui};
@@ -20,8 +21,23 @@ use omnicli::{
 
 use tokio_util::sync::CancellationToken;
 
+const HELP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::BrightBlue.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::BrightBlue.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::BrightCyan.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::BrightMagenta.on_default())
+    .error(AnsiColor::BrightRed.on_default().effects(Effects::BOLD))
+    .valid(AnsiColor::BrightGreen.on_default())
+    .invalid(AnsiColor::BrightYellow.on_default());
+
 #[derive(Debug, Parser)]
-#[command(name = "omni", version, about = "Provider-neutral agentic CLI runtime")]
+#[command(
+    name = "omni",
+    version,
+    about = "Provider-neutral agentic CLI runtime — chat, tools, workflows, and parallel agents in your terminal",
+    styles = HELP_STYLES,
+    after_help = "Examples:\n  omni tui                                Launch the interactive TUI\n  omni run \"read README.md\"               Run an agent task\n  omni run --allow-shell \"shell git status\"\n  omni ask \"explain the agent loop\"\n  omni plan \"add OAuth login\"\n  omni sessions list\n\nSee docs/commands.md for the full command reference."
+)]
 struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,

@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
-        KeyEventKind, KeyModifiers,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -20,15 +20,20 @@ use futures_util::StreamExt;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    text::{Line, Span, Text},
+    widgets::{
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::theme;
 
 use crate::{
     Agent, AuthorizationRequest, ModelSpec, PermissionAuthorizer, PermissionDecision, Policy,
@@ -215,6 +220,48 @@ impl Editor {
         display.insert(self.cursor, '|');
         display
     }
+
+    fn move_word_left(&mut self) {
+        let mut chars: Vec<(usize, char)> = self.text[..self.cursor].char_indices().collect();
+        while let Some(&(index, character)) = chars.last() {
+            if character.is_alphanumeric() || character == '_' {
+                break;
+            }
+            self.cursor = index;
+            chars.pop();
+        }
+        while let Some(&(index, character)) = chars.last() {
+            if !(character.is_alphanumeric() || character == '_') {
+                break;
+            }
+            self.cursor = index;
+            chars.pop();
+        }
+    }
+
+    fn move_word_right(&mut self) {
+        let start = self.cursor;
+        let mut seen_word = false;
+        for (index, character) in self.text[start..].char_indices() {
+            let is_word = character.is_alphanumeric() || character == '_';
+            if seen_word && !is_word {
+                self.cursor = start + index;
+                return;
+            }
+            if is_word {
+                seen_word = true;
+            }
+        }
+        self.cursor = self.text.len();
+    }
+
+    fn delete_word_back(&mut self) {
+        let end = self.cursor;
+        self.move_word_left();
+        if self.cursor < end {
+            self.text.replace_range(self.cursor..end, "");
+        }
+    }
 }
 
 fn normalize_input(value: &str) -> String {
@@ -373,6 +420,9 @@ struct App {
     models: Option<ModelPicker>,
     supervisors: Option<SupervisorDashboard>,
     usage: Usage,
+    run_started: Option<std::time::Instant>,
+    history: Vec<String>,
+    history_index: Option<usize>,
 }
 
 impl App {
@@ -384,7 +434,7 @@ impl App {
             session_id: options.session_id,
             verify: options.verify,
             editor: Editor::default(),
-            transcript: vec!["OmniCLI ready. Enter a task to begin.".into()],
+            transcript: vec!["✦ omni ready — describe a task below to begin.".into()],
             streaming: String::new(),
             status: "idle".into(),
             running: false,
@@ -399,6 +449,9 @@ impl App {
             models: None,
             supervisors: None,
             usage: Usage::default(),
+            run_started: None,
+            history: Vec::new(),
+            history_index: None,
         }
     }
 
@@ -547,6 +600,7 @@ impl App {
 
     fn workflow_started(&mut self, run_id: String) {
         self.running = true;
+        self.run_started = Some(std::time::Instant::now());
         self.active_kind = Some(ActiveKind::Workflow);
         self.status = "workflow running".into();
         if let Some(dashboard) = &mut self.workflows {
@@ -714,60 +768,66 @@ async fn event_loop(
             break;
         }
         tokio::select! {
-            event = events.next() => {
-                match event {
-                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        handle_key(
-                            key,
-                            &mut app,
-                            &agent,
-                            &store,
-                            &workflows,
-                            &supervisors,
-                            &provider_factory,
-                            &backend_sender,
-                        );
-                    }
-                    Some(Ok(Event::Paste(text))) if !app.running
-                        && app.permission.is_none()
-                        && app.sessions.is_none()
-                        && app.models.is_none() => {
-                        app.editor.insert(&text);
-                    }
-                    Some(Ok(Event::Resize(_, _))) => {}
-                    Some(Err(error)) => return Err(error.into()),
-                    None => return Err(TuiError::InputClosed),
-                    _ => {}
-                }
-            }
-            event = backend_receiver.recv() => {
-                match event {
-                    Some(BackendEvent::Run(event)) => app.handle_run_event(event),
-                    Some(BackendEvent::Complete(result)) => app.complete(result),
-                    Some(BackendEvent::WorkflowStarted(run_id)) => app.workflow_started(run_id),
-                    Some(BackendEvent::WorkflowSnapshot(result)) => app.workflow_snapshot(result),
-                    Some(BackendEvent::WorkflowComplete(result)) => app.workflow_complete(result),
-                    Some(BackendEvent::SupervisorStarted(run_id)) => {
-                        app.running = true;
-                        app.active_kind = Some(ActiveKind::Supervisor);
-                        if let Some(dashboard) = &mut app.supervisors {
-                            dashboard.active_run_id = Some(run_id);
+                event = events.next() => {
+                    match event {
+                        Some(Ok(Event::Mouse(mouse))) => match mouse.kind {
+                            MouseEventKind::ScrollUp => app.scroll = app.scroll.saturating_sub(3),
+                            MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_add(3),
+                            _ => {}
+                        },
+                        Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                            handle_key(
+                                key,
+                                &mut app,
+                                &agent,
+                                &store,
+                                &workflows,
+                                &supervisors,
+                                &provider_factory,
+                                &backend_sender,
+                            );
                         }
+                        Some(Ok(Event::Paste(text))) if !app.running
+                            && app.permission.is_none()
+                            && app.sessions.is_none()
+                            && app.models.is_none() => {
+                            app.editor.insert(&text);
+                        }
+                        Some(Ok(Event::Resize(_, _))) => {}
+                        Some(Err(error)) => return Err(error.into()),
+                        None => return Err(TuiError::InputClosed),
+                        _ => {}
                     }
-                    Some(BackendEvent::SupervisorSnapshot(result)) => app.supervisor_snapshot(result),
-                    Some(BackendEvent::SupervisorComplete(result)) => app.supervisor_complete(result),
-                    None => return Err(TuiError::BackendClosed),
                 }
-            }
-            prompt = permission_receiver.recv(), if app.permission.is_none() => {
-                if let Some(prompt) = prompt {
-                    app.status = "permission".into();
-                    app.tools.set_status(&prompt.request.call_id, ToolStatus::Awaiting);
-                    app.permission = Some(prompt);
+                event = backend_receiver.recv() => {
+                    match event {
+                        Some(BackendEvent::Run(event)) => app.handle_run_event(event),
+                        Some(BackendEvent::Complete(result)) => app.complete(result),
+                        Some(BackendEvent::WorkflowStarted(run_id)) => app.workflow_started(run_id),
+                        Some(BackendEvent::WorkflowSnapshot(result)) => app.workflow_snapshot(result),
+                        Some(BackendEvent::WorkflowComplete(result)) => app.workflow_complete(result),
+                        Some(BackendEvent::SupervisorStarted(run_id)) => {
+                            app.running = true;
+        app.run_started = Some(std::time::Instant::now());
+                            app.active_kind = Some(ActiveKind::Supervisor);
+                            if let Some(dashboard) = &mut app.supervisors {
+                                dashboard.active_run_id = Some(run_id);
+                            }
+                        }
+                        Some(BackendEvent::SupervisorSnapshot(result)) => app.supervisor_snapshot(result),
+                        Some(BackendEvent::SupervisorComplete(result)) => app.supervisor_complete(result),
+                        None => return Err(TuiError::BackendClosed),
+                    }
                 }
+                prompt = permission_receiver.recv(), if app.permission.is_none() => {
+                    if let Some(prompt) = prompt {
+                        app.status = "permission".into();
+                        app.tools.set_status(&prompt.request.call_id, ToolStatus::Awaiting);
+                        app.permission = Some(prompt);
+                    }
+                }
+                _ = redraw.tick() => {}
             }
-            _ = redraw.tick() => {}
-        }
     }
     Ok(())
 }
@@ -1072,9 +1132,30 @@ fn handle_key(
         }
         KeyCode::Esc if app.editor.text.is_empty() => app.exit_requested = true,
         KeyCode::Esc => app.editor.clear(),
+        KeyCode::Backspace
+            if !app.running
+                && (key.modifiers.contains(KeyModifiers::CONTROL)
+                    || key.modifiers.contains(KeyModifiers::ALT)) =>
+        {
+            app.editor.delete_word_back();
+        }
         KeyCode::Backspace if !app.running => app.editor.backspace(),
         KeyCode::Delete if !app.running => app.editor.delete(),
+        KeyCode::Left
+            if !app.running
+                && (key.modifiers.contains(KeyModifiers::CONTROL)
+                    || key.modifiers.contains(KeyModifiers::ALT)) =>
+        {
+            app.editor.move_word_left();
+        }
         KeyCode::Left if !app.running => app.editor.move_left(),
+        KeyCode::Right
+            if !app.running
+                && (key.modifiers.contains(KeyModifiers::CONTROL)
+                    || key.modifiers.contains(KeyModifiers::ALT)) =>
+        {
+            app.editor.move_word_right();
+        }
         KeyCode::Right if !app.running => app.editor.move_right(),
         KeyCode::Home if !app.running => app.editor.home(),
         KeyCode::End if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1086,6 +1167,27 @@ fn handle_key(
             if !app.running && !key.modifiers.contains(KeyModifiers::CONTROL) =>
         {
             app.editor.insert(&character.to_string());
+        }
+        KeyCode::Up if !app.running && !app.history.is_empty() => {
+            let next_index = match app.history_index {
+                Some(0) => 0,
+                Some(index) => index - 1,
+                None => app.history.len() - 1,
+            };
+            app.history_index = Some(next_index);
+            app.editor.text = app.history[next_index].clone();
+            app.editor.cursor = app.editor.text.len();
+        }
+        KeyCode::Down if !app.running && app.history_index.is_some() => {
+            let current = app.history_index.unwrap_or(0);
+            if current + 1 >= app.history.len() {
+                app.history_index = None;
+                app.editor.clear();
+            } else {
+                app.history_index = Some(current + 1);
+                app.editor.text = app.history[current + 1].clone();
+                app.editor.cursor = app.editor.text.len();
+            }
         }
         KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(8),
         KeyCode::PageDown => app.scroll = app.scroll.saturating_add(8),
@@ -1106,6 +1208,10 @@ fn start_run(
         return;
     }
     let prompt = app.editor.take();
+    if app.history.last() != Some(&prompt) {
+        app.history.push(prompt.clone());
+    }
+    app.history_index = None;
     match parse_tui_command(prompt) {
         TuiCommand::Workflows => {
             let mut dashboard = WorkflowDashboard {
@@ -1276,6 +1382,7 @@ fn start_agent_run(
     let cancellation = CancellationToken::new();
     app.cancellation = Some(cancellation.clone());
     app.running = true;
+    app.run_started = Some(std::time::Instant::now());
     app.active_kind = Some(ActiveKind::Agent);
     app.status = "running".into();
     let request = RunRequest {
@@ -1362,6 +1469,7 @@ fn start_workflow_file(
     let cancellation = CancellationToken::new();
     app.cancellation = Some(cancellation.clone());
     app.running = true;
+    app.run_started = Some(std::time::Instant::now());
     app.active_kind = Some(ActiveKind::Workflow);
     app.status = "workflow preparing".into();
     let runtime = runtime.clone();
@@ -1390,6 +1498,7 @@ fn start_workflow_resume(
     let cancellation = CancellationToken::new();
     app.cancellation = Some(cancellation.clone());
     app.running = true;
+    app.run_started = Some(std::time::Instant::now());
     app.active_kind = Some(ActiveKind::Workflow);
     app.status = "workflow preparing".into();
     let runtime = runtime.clone();
@@ -1491,6 +1600,7 @@ fn start_supervisor(
     let cancellation = CancellationToken::new();
     app.cancellation = Some(cancellation.clone());
     app.running = true;
+    app.run_started = Some(std::time::Instant::now());
     app.active_kind = Some(ActiveKind::Supervisor);
     app.status = "supervisor preparing".into();
     let runtime = runtime.clone();
@@ -1552,37 +1662,123 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     } else {
         session.into()
     };
-    let usage = if app.usage.total_tokens > 0 {
-        format!(
-            "  tokens={}/{}/{}",
-            app.usage.input_tokens, app.usage.output_tokens, app.usage.total_tokens
-        )
-    } else {
-        String::new()
+    let status_style = match app.status.as_str() {
+        status if status.contains("error") => Style::default().fg(theme::ERROR),
+        status if status.contains("running") => Style::default().fg(theme::WARNING),
+        "complete" => Style::default().fg(theme::SUCCESS),
+        _ => Style::default().fg(theme::TEXT_MUTED),
     };
-    frame.render_widget(
-        Paragraph::new(format!(
-            "OMNICLI  provider={}  session={}  state={}{}",
-            app.provider, session, app.status, usage
-        ))
-        .style(
+    let status_dot = match app.status.as_str() {
+        status if status.contains("error") => "✖",
+        status if status.contains("running") => spinner_glyph(),
+        "complete" => "●",
+        _ => "○",
+    };
+    let mut header_spans = vec![
+        Span::styled(
+            " omni ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme::BG)
+                .bg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
-        )
-        .block(Block::default().borders(Borders::ALL)),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            app.provider.clone(),
+            Style::default()
+                .fg(theme::ACCENT_ALT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  │  ", theme::dim()),
+        Span::styled("session ", theme::dim()),
+        Span::styled(session, theme::muted()),
+        Span::styled("  │  ", theme::dim()),
+        Span::styled(format!("{status_dot} "), status_style),
+        Span::styled(
+            app.status.clone(),
+            status_style.add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if app.usage.total_tokens > 0 {
+        header_spans.push(Span::styled("  │  ", theme::dim()));
+        header_spans.push(Span::styled(
+            format!(
+                "tokens {} in · {} out · {} total",
+                app.usage.input_tokens, app.usage.output_tokens, app.usage.total_tokens
+            ),
+            theme::dim(),
+        ));
+    }
+    if app.running && let Some(started) = app.run_started {
+        let secs = started.elapsed().as_secs();
+        header_spans.push(Span::styled("  │  ", theme::dim()));
+        header_spans.push(Span::styled(
+            format!("⏱ {:02}:{:02}", secs / 60, secs % 60),
+            theme::warning(),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(header_spans)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme::BORDER)),
+        ),
         chunks[0],
     );
     let mut lines = Vec::new();
     for line in &app.transcript {
         if let Some(content) = line.strip_prefix("OMNI ") {
+            lines.push(transcript_label("omni", theme::ACCENT));
             lines.extend(crate::tui_markdown::render_markdown(content, area.width));
+            lines.push(Line::default());
+        } else if let Some(content) = line.strip_prefix("YOU  ") {
+            lines.push(transcript_label("you", theme::ACCENT_ALT));
+            lines.push(Line::from(Span::styled(
+                content.to_string(),
+                Style::default().fg(theme::TEXT),
+            )));
+            lines.push(Line::default());
+        } else if let Some(content) = line.strip_prefix("✦ ") {
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::styled("  ◆ ", theme::accent_bold()),
+                Span::styled(
+                    "omni",
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" — provider-neutral agentic runtime", theme::muted()),
+            ]));
+            lines.push(Line::from(Span::styled(
+                format!("    {content}"),
+                theme::dim(),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("    tip ", theme::warning()),
+                Span::styled(
+                    "try \"read README.md\" or press ^P to switch models",
+                    theme::dim(),
+                ),
+            ]));
+            lines.push(Line::default());
+        } else if line.contains("ERROR") {
+            lines.push(Line::from(Span::styled(line.clone(), theme::error())));
         } else {
-            lines.push(Line::from(line.as_str()));
+            lines.push(Line::from(Span::styled(line.clone(), theme::dim())));
         }
     }
     if !app.streaming.is_empty() {
-        lines.push(Line::from(format!("OMNI {}", app.streaming)));
+        lines.push(transcript_label("omni", theme::ACCENT));
+        lines.extend(crate::tui_markdown::render_markdown(
+            &app.streaming,
+            area.width,
+        ));
+        lines.push(Line::from(Span::styled(
+            if blink_on() { "▍" } else { " " },
+            theme::accent(),
+        )));
     }
     let (conversation_area, tool_area) = if area.width >= 96 && !app.tools.order.is_empty() {
         let body = Layout::default()
@@ -1605,15 +1801,26 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         .saturating_sub(visible_height);
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .block(
-                Block::default()
-                    .title(" Conversation ")
-                    .borders(Borders::ALL),
-            )
+            .block(theme::panel("Conversation"))
             .wrap(Wrap { trim: false })
             .scroll((app.scroll.min(max_scroll), 0)),
         conversation_area,
     );
+    if max_scroll > 0 {
+        let mut scrollbar_state =
+            ScrollbarState::new(max_scroll as usize).position(app.scroll.min(max_scroll) as usize);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .thumb_symbol("┃")
+                .track_style(Style::default().fg(theme::BORDER))
+                .thumb_style(Style::default().fg(theme::ACCENT)),
+            conversation_area.inner(Margin::new(0, 1)),
+            &mut scrollbar_state,
+        );
+    }
     if let Some(tool_area) = tool_area {
         let tool_lines = app
             .tools
@@ -1621,34 +1828,76 @@ fn render(frame: &mut Frame<'_>, app: &App) {
             .iter()
             .filter_map(|id| app.tools.items.get(id))
             .map(|item| {
-                Line::from(format!(
-                    "{} {:<9} {} {}",
-                    tool_status_label(item.status),
-                    item.name,
-                    sanitize(&item.arguments, 80),
-                    sanitize(&item.summary, 80)
-                ))
+                let (glyph, glyph_style) = tool_status_glyph(item.status);
+                Line::from(vec![
+                    Span::styled(format!("{glyph} "), glyph_style),
+                    Span::styled(
+                        format!("{:<9} ", item.name),
+                        Style::default()
+                            .fg(theme::TEXT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(
+                            "{} {}",
+                            sanitize(&item.arguments, 80),
+                            sanitize(&item.summary, 80)
+                        ),
+                        theme::dim(),
+                    ),
+                ])
             })
             .collect::<Vec<_>>();
+        let active = app
+            .tools
+            .items
+            .values()
+            .filter(|item| {
+                matches!(
+                    item.status,
+                    ToolStatus::Requested | ToolStatus::Awaiting | ToolStatus::Running
+                )
+            })
+            .count();
+        let tools_title = if active > 0 {
+            format!("Tools · {active} active")
+        } else {
+            format!("Tools · {}", app.tools.order.len())
+        };
         frame.render_widget(
             Paragraph::new(tool_lines)
-                .block(Block::default().title(" Tools ").borders(Borders::ALL))
+                .block(theme::panel(&tools_title))
                 .wrap(Wrap { trim: true }),
             tool_area,
         );
     }
-    frame.render_widget(
+    let prompt_paragraph = if app.editor.text.is_empty() && !app.running {
+        Paragraph::new(Line::from(vec![
+            Span::styled("▏", theme::accent()),
+            Span::styled(
+                "Describe a task… (Alt+↵ for a new line)",
+                theme::dim().add_modifier(Modifier::ITALIC),
+            ),
+        ]))
+    } else {
         Paragraph::new(app.editor.display_with_cursor())
+    };
+    frame.render_widget(
+        prompt_paragraph
             .wrap(Wrap { trim: false })
-            .block(Block::default().title(" Prompt ").borders(Borders::ALL)),
+            .block(theme::panel_accent("Prompt")),
         chunks[2],
     );
     frame.render_widget(
-        Paragraph::new(
-            "Enter send  Ctrl+P models  Ctrl+L sessions  Ctrl+W workflows  Ctrl+T tasks",
-        )
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(Line::from(key_hints(&[
+            ("↵", "send"),
+            ("↑", "history"),
+            ("^P", "models"),
+            ("^L", "sessions"),
+            ("^W", "workflows"),
+            ("^T", "tasks"),
+        ])))
+        .alignment(Alignment::Center),
         chunks[3],
     );
     if let Some(dashboard) = &app.supervisors {
@@ -1659,7 +1908,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
             .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
             .split(modal);
         let runs = if dashboard.runs.is_empty() {
-            vec![Line::from("No supervisor runs")]
+            vec![Line::styled("No supervisor runs", theme::dim())]
         } else {
             dashboard
                 .runs
@@ -1678,7 +1927,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                         sanitize(&run.task_file, 36)
                     );
                     if index == dashboard.selected {
-                        Line::styled(line, Style::default().fg(Color::Black).bg(Color::Cyan))
+                        Line::styled(line, theme::selection())
                     } else {
                         Line::from(line)
                     }
@@ -1686,11 +1935,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                 .collect()
         };
         frame.render_widget(
-            Paragraph::new(runs).block(
-                Block::default()
-                    .title(" Agent Batches ")
-                    .borders(Borders::ALL),
-            ),
+            Paragraph::new(runs).block(theme::panel_accent("Agent batches")),
             panels[0],
         );
         let mut tasks = dashboard
@@ -1716,24 +1961,22 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                 }));
                 lines
             })
-            .unwrap_or_else(|| vec![Line::from("Select a batch to inspect tasks")]);
+            .unwrap_or_else(|| {
+                vec![Line::styled(
+                    "Select a batch to inspect tasks",
+                    theme::dim(),
+                )]
+            });
         if let Some(error) = &dashboard.error {
-            tasks.push(Line::styled(
-                sanitize(error, 512),
-                Style::default().fg(Color::Red),
-            ));
+            tasks.push(Line::styled(sanitize(error, 512), theme::error()));
         }
         tasks.push(Line::styled(
             "Up/Down select  Enter session  c cancel  Ctrl+R refresh  Esc close",
-            Style::default().fg(Color::DarkGray),
+            theme::dim(),
         ));
         frame.render_widget(
             Paragraph::new(tasks)
-                .block(
-                    Block::default()
-                        .title(" Parallel Tasks ")
-                        .borders(Borders::ALL),
-                )
+                .block(theme::panel_accent("Parallel tasks"))
                 .wrap(Wrap { trim: false }),
             panels[1],
         );
@@ -1771,22 +2014,18 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                     if live { " LIVE" } else { "" },
                 );
                 if index == dashboard.selected {
-                    Line::styled(line, Style::default().fg(Color::Black).bg(Color::Cyan))
+                    Line::styled(line, theme::selection())
                 } else {
                     Line::from(line)
                 }
             })
             .collect::<Vec<_>>();
         if run_lines.is_empty() {
-            run_lines.push(Line::from("No persisted workflow runs"));
+            run_lines.push(Line::styled("No persisted workflow runs", theme::dim()));
         }
         frame.render_widget(
             Paragraph::new(run_lines)
-                .block(
-                    Block::default()
-                        .title(" Workflow Runs ")
-                        .borders(Borders::ALL),
-                )
+                .block(theme::panel_accent("Workflow runs"))
                 .wrap(Wrap { trim: true }),
             panels[0],
         );
@@ -1816,9 +2055,9 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                         Line::styled(
                             line,
                             if dashboard.focus == WorkflowFocus::Steps {
-                                Style::default().fg(Color::Black).bg(Color::Cyan)
+                                theme::selection()
                             } else {
-                                Style::default().fg(Color::Cyan)
+                                theme::accent()
                             },
                         )
                     } else {
@@ -1831,20 +2070,22 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                 }
                 lines
             })
-            .unwrap_or_else(|| vec![Line::from("Select a run to inspect its DAG")]);
+            .unwrap_or_else(|| {
+                vec![Line::styled(
+                    "Select a run to inspect its DAG",
+                    theme::dim(),
+                )]
+            });
         if let Some(error) = &dashboard.error {
-            step_lines.push(Line::styled(
-                sanitize(error, 512),
-                Style::default().fg(Color::Red),
-            ));
+            step_lines.push(Line::styled(sanitize(error, 512), theme::error()));
         }
         step_lines.push(Line::styled(
             "Up/Down select  r resume  n run file  c cancel  Ctrl+R refresh  Esc close",
-            Style::default().fg(Color::DarkGray),
+            theme::dim(),
         ));
         frame.render_widget(
             Paragraph::new(step_lines)
-                .block(Block::default().title(" Live DAG ").borders(Borders::ALL))
+                .block(theme::panel_accent("Live DAG"))
                 .wrap(Wrap { trim: false })
                 .scroll((dashboard.detail_scroll, 0)),
             panels[1],
@@ -1865,24 +2106,21 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                     sanitize(&session.title, 80)
                 );
                 if index == picker.selected {
-                    Line::styled(line, Style::default().fg(Color::Black).bg(Color::Cyan))
+                    Line::styled(line, theme::selection())
                 } else {
                     Line::from(line)
                 }
             })
             .collect::<Vec<_>>();
         if let Some(error) = &picker.error {
-            session_lines.push(Line::styled(
-                sanitize(error, 256),
-                Style::default().fg(Color::Red),
-            ));
+            session_lines.push(Line::styled(sanitize(error, 256), theme::error()));
         }
         if session_lines.is_empty() {
-            session_lines.push(Line::from("No saved sessions"));
+            session_lines.push(Line::styled("No saved sessions", theme::dim()));
         }
         frame.render_widget(
             Paragraph::new(session_lines)
-                .block(Block::default().title(" Sessions ").borders(Borders::ALL))
+                .block(theme::panel_accent("Sessions"))
                 .wrap(Wrap { trim: true }),
             modal,
         );
@@ -1904,7 +2142,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                     if active { "  [active]" } else { "" },
                 );
                 if index == picker.selected {
-                    Line::styled(line, Style::default().fg(Color::Black).bg(Color::Cyan))
+                    Line::styled(line, theme::selection())
                 } else {
                     Line::from(line)
                 }
@@ -1912,14 +2150,11 @@ fn render(frame: &mut Frame<'_>, app: &App) {
             .collect::<Vec<_>>();
         if let Some(error) = &picker.error {
             lines.push(Line::from(""));
-            lines.push(Line::styled(
-                sanitize(error, 512),
-                Style::default().fg(Color::Red),
-            ));
+            lines.push(Line::styled(sanitize(error, 512), theme::error()));
         }
         frame.render_widget(
             Paragraph::new(lines)
-                .block(Block::default().title(" Models ").borders(Borders::ALL))
+                .block(theme::panel_accent("Models"))
                 .wrap(Wrap { trim: true }),
             modal,
         );
@@ -1936,12 +2171,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                 arguments
             ))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(" Permission Required ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow)),
-            ),
+            .block(theme::panel_warning("Permission required")),
             modal,
         );
     }
@@ -1972,7 +2202,7 @@ fn workflow_step_detail_lines(step: &crate::store::StoredWorkflowStep) -> Vec<Li
                     "Stored report is invalid: {}",
                     sanitize(&error.to_string(), 512)
                 ),
-                Style::default().fg(Color::Red),
+                theme::error(),
             ));
             return lines;
         }
@@ -1980,7 +2210,7 @@ fn workflow_step_detail_lines(step: &crate::store::StoredWorkflowStep) -> Vec<Li
     if let Some(error) = report.error {
         lines.push(Line::styled(
             format!("{}: {}", error.code, sanitize(&error.message, 2048)),
-            Style::default().fg(Color::Red),
+            theme::error(),
         ));
     }
     if !report.artifacts.is_empty() {
@@ -2003,7 +2233,7 @@ fn workflow_step_detail_lines(step: &crate::store::StoredWorkflowStep) -> Vec<Li
             lines.push(Line::from("stderr:"));
             lines.push(Line::styled(
                 sanitize(&output.stderr, 16 * 1024),
-                Style::default().fg(Color::Red),
+                theme::error(),
             ));
         }
         lines.push(Line::from(format!(
@@ -2015,15 +2245,57 @@ fn workflow_step_detail_lines(step: &crate::store::StoredWorkflowStep) -> Vec<Li
     lines
 }
 
-fn tool_status_label(status: ToolStatus) -> &'static str {
+fn tool_status_glyph(status: ToolStatus) -> (&'static str, Style) {
     match status {
-        ToolStatus::Requested => "REQ",
-        ToolStatus::Awaiting => "ASK",
-        ToolStatus::Running => "RUN",
-        ToolStatus::Succeeded => "OK",
-        ToolStatus::Failed => "ERR",
-        ToolStatus::Interrupted => "INT",
+        ToolStatus::Requested => ("◌", Style::default().fg(theme::TEXT_DIM)),
+        ToolStatus::Awaiting => ("◔", Style::default().fg(theme::WARNING)),
+        ToolStatus::Running => (spinner_glyph(), Style::default().fg(theme::ACCENT)),
+        ToolStatus::Succeeded => ("●", Style::default().fg(theme::SUCCESS)),
+        ToolStatus::Failed => ("✖", Style::default().fg(theme::ERROR)),
+        ToolStatus::Interrupted => ("◒", Style::default().fg(theme::WARNING)),
     }
+}
+
+fn transcript_label(name: &str, color: Color) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("▍ ", Style::default().fg(color)),
+        Span::styled(
+            name.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn key_hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, (key, label)) in pairs.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  ·  ", theme::dim()));
+        }
+        spans.push(Span::styled((*key).to_string(), theme::hint_key()));
+        spans.push(Span::styled(format!(" {label}"), theme::hint_label()));
+    }
+    spans
+}
+
+/// Whether the streaming cursor should be visible in the current blink phase.
+fn blink_on() -> bool {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    (millis / 530).is_multiple_of(2)
+}
+
+/// Braille spinner frame derived from wall-clock time, so it animates on
+/// every redraw tick without extra state.
+fn spinner_glyph() -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    FRAMES[((millis / 80) as usize) % FRAMES.len()]
 }
 
 fn centered_rect(horizontal: u16, vertical: u16, area: Rect) -> Rect {
@@ -2062,9 +2334,20 @@ fn sanitize(value: &str, limit: usize) -> String {
 }
 
 fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, TuiError> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = restore_terminal();
+        default_hook(info);
+    }));
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
+    if let Err(error) = execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture,
+        Hide
+    ) {
         let _ = disable_raw_mode();
         return Err(error.into());
     }
@@ -2076,6 +2359,7 @@ fn restore_terminal() -> Result<(), TuiError> {
     execute!(
         io::stdout(),
         DisableBracketedPaste,
+        DisableMouseCapture,
         Show,
         LeaveAlternateScreen
     )?;
@@ -2417,5 +2701,52 @@ mod tests {
         );
         assert_eq!(app.active_model, openai);
         assert!(app.models.is_none());
+    }
+}
+
+#[cfg(test)]
+mod editor_word_tests {
+    use super::Editor;
+
+    fn editor_with(text: &str) -> Editor {
+        Editor {
+            text: text.to_string(),
+            cursor: text.len(),
+        }
+    }
+
+    #[test]
+    fn word_left_stops_at_word_start() {
+        let mut editor = editor_with("hello world");
+        editor.move_word_left();
+        assert_eq!(editor.cursor, 6);
+        editor.move_word_left();
+        assert_eq!(editor.cursor, 0);
+    }
+
+    #[test]
+    fn word_right_moves_past_word() {
+        let mut editor = editor_with("one two");
+        editor.cursor = 0;
+        editor.move_word_right();
+        assert_eq!(editor.cursor, 3);
+        editor.move_word_right();
+        assert_eq!(editor.cursor, 7);
+    }
+
+    #[test]
+    fn delete_word_back_removes_previous_word() {
+        let mut editor = editor_with("cargo build");
+        editor.delete_word_back();
+        assert_eq!(editor.text, "cargo ");
+        assert_eq!(editor.cursor, 6);
+    }
+
+    #[test]
+    fn delete_word_back_on_empty_is_noop() {
+        let mut editor = editor_with("");
+        editor.delete_word_back();
+        assert_eq!(editor.text, "");
+        assert_eq!(editor.cursor, 0);
     }
 }

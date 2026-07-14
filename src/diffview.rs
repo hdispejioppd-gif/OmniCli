@@ -2,7 +2,11 @@
 
 use std::path::PathBuf;
 
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use similar::TextDiff;
+
+use crate::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffKind {
@@ -150,6 +154,54 @@ impl DiffView {
             ins_idx += 1;
         }
         result.join("\n")
+    }
+}
+
+impl DiffView {
+    /// Render the diff as styled terminal lines: a bold file header, accent
+    /// hunk headers with state badges, green additions, red removals, and
+    /// dimmed context with line numbers.
+    pub fn render_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        lines.push(Line::from(vec![
+            Span::styled("◆ ", theme::accent()),
+            Span::styled(
+                self.path.display().to_string(),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        for (index, hunk) in self.hunks.iter().enumerate() {
+            let (badge, badge_style) = match hunk.state {
+                HunkState::Pending => ("● pending", theme::warning()),
+                HunkState::Accepted => ("✓ accepted", theme::success()),
+                HunkState::Rejected => ("✗ rejected", theme::error()),
+            };
+            let cursor = if index == self.cursor { "▶ " } else { "  " };
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::styled(cursor.to_string(), theme::accent()),
+                Span::styled(hunk.header.clone(), theme::accent()),
+                Span::raw("  "),
+                Span::styled(badge.to_string(), badge_style),
+            ]));
+            for line in &hunk.lines {
+                let (prefix, style) = match line.kind {
+                    DiffKind::Added => ("+", Style::default().fg(theme::SUCCESS)),
+                    DiffKind::Removed => ("-", Style::default().fg(theme::ERROR)),
+                    DiffKind::Context => (" ", theme::dim()),
+                };
+                let old_no = line.old_no.map(|n| n.to_string()).unwrap_or_default();
+                let new_no = line.new_no.map(|n| n.to_string()).unwrap_or_default();
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{old_no:>4} {new_no:>4} "), theme::dim()),
+                    Span::styled(format!("{prefix} "), style),
+                    Span::styled(line.content.clone(), style),
+                ]));
+            }
+        }
+        lines
     }
 }
 

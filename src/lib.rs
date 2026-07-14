@@ -15,6 +15,7 @@ pub mod schema;
 pub mod search;
 pub mod store;
 pub mod supervisor;
+pub mod theme;
 pub mod tools;
 pub mod tui;
 pub mod tui_markdown;

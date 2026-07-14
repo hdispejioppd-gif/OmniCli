@@ -5,6 +5,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::sync::LazyLock;
 
+use crate::theme;
+
 static SYNTAXES: LazyLock<syntect::parsing::SyntaxSet> =
     LazyLock::new(syntect::parsing::SyntaxSet::load_defaults_newlines);
 static THEMES: LazyLock<syntect::highlighting::ThemeSet> =
@@ -12,12 +14,12 @@ static THEMES: LazyLock<syntect::highlighting::ThemeSet> =
 
 /// Render markdown into ratatui `Line`s with styling.
 ///
-/// - Headings: bold + colored (h1 cyan, h2 blue, h3 magenta)
-/// - Inline code: bg DarkGray, fg Yellow
+/// - Headings: bold + theme accent colors (h1 blue, h2 purple, h3 cyan)
+/// - Inline code: theme surface background, amber foreground
 /// - Fenced code blocks: syntect highlight using "base16-ocean.dark"
-/// - Lists: "  * " for bullets, "  1. " for ordered
+/// - Lists: "  • " for bullets, "  1. " for ordered
 /// - Bold / Italic / Strikethrough
-/// - Blockquote: prefix "| ", fg Gray
+/// - Blockquote: prefix "▌ ", muted italic
 pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
     let theme = &THEMES.themes["base16-ocean.dark"];
 
@@ -26,6 +28,7 @@ pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
     let mut style_stack: Vec<Style> = vec![Style::default()];
     let mut code_block_lang: Option<String> = None;
     let mut code_buf = String::new();
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
 
     fn top_style(stack: &[Style]) -> Style {
         stack.last().copied().unwrap_or_default()
@@ -43,9 +46,9 @@ pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 let color = match level {
-                    HeadingLevel::H1 => Color::Cyan,
-                    HeadingLevel::H2 => Color::Blue,
-                    _ => Color::Magenta,
+                    HeadingLevel::H1 => theme::ACCENT,
+                    HeadingLevel::H2 => theme::ACCENT_ALT,
+                    _ => theme::INFO,
                 };
                 style_stack.push(Style::default().fg(color).add_modifier(Modifier::BOLD));
             }
@@ -102,7 +105,7 @@ pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
             Event::Code(t) => {
                 current.push(Span::styled(
                     t.to_string(),
-                    Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+                    Style::default().fg(theme::WARNING).bg(theme::SURFACE),
                 ));
             }
             Event::Start(Tag::Emphasis) => {
@@ -120,18 +123,39 @@ pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
             Event::Start(Tag::BlockQuote(_)) => {
                 style_stack.push(
                     Style::default()
-                        .fg(Color::Gray)
+                        .fg(theme::TEXT_MUTED)
                         .add_modifier(Modifier::ITALIC),
                 );
-                current.push(Span::styled("| ", Style::default().fg(Color::Gray)));
+                current.push(Span::styled("▌ ", Style::default().fg(theme::TEXT_DIM)));
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 style_stack.pop();
                 let line = flush_line(&mut current);
                 lines.push(line);
             }
+            Event::Start(Tag::List(start)) => {
+                list_stack.push(start);
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_stack.pop();
+            }
             Event::Start(Tag::Item) => {
-                current.push(Span::styled("  * ", Style::default().fg(Color::Yellow)));
+                let indent = "  ".repeat(list_stack.len().max(1));
+                match list_stack.last_mut() {
+                    Some(Some(number)) => {
+                        current.push(Span::styled(
+                            format!("{indent}{number}. "),
+                            Style::default().fg(theme::ACCENT),
+                        ));
+                        *number += 1;
+                    }
+                    _ => {
+                        current.push(Span::styled(
+                            format!("{indent}• "),
+                            Style::default().fg(theme::ACCENT),
+                        ));
+                    }
+                }
             }
             Event::Start(Tag::Strikethrough) => {
                 style_stack.push(top_style(&style_stack).add_modifier(Modifier::CROSSED_OUT));
@@ -197,7 +221,7 @@ mod tests {
         let has_bullet = lines.iter().any(|l| {
             l.spans
                 .first()
-                .map(|s| s.content.contains('*'))
+                .map(|s| s.content.contains('•'))
                 .unwrap_or(false)
         });
         assert!(has_bullet);

@@ -1,4 +1,4 @@
-﻿//! Role-based model routing: map agent roles to provider/model pairs
+//! Role-based model routing: map agent roles to provider/model pairs
 //! with fallback chains.
 
 use std::collections::HashMap;
@@ -31,11 +31,24 @@ pub struct Router {
 }
 
 impl Router {
-    pub fn new(config: RoutingConfig) -> Self { Self { config, cursor: HashMap::new() } }
+    pub fn new(config: RoutingConfig) -> Self {
+        Self {
+            config,
+            cursor: HashMap::new(),
+        }
+    }
 
     fn chain(&self, role: &str) -> Result<&[ModelTarget], RoutingError> {
-        let chain = self.config.roles.get(role).map(|v| v.as_slice()).filter(|v| !v.is_empty()).unwrap_or(self.config.default.as_slice());
-        if chain.is_empty() { return Err(RoutingError::NoRoute(role.to_string())); }
+        let chain = self
+            .config
+            .roles
+            .get(role)
+            .map(|v| v.as_slice())
+            .filter(|v| !v.is_empty())
+            .unwrap_or(self.config.default.as_slice());
+        if chain.is_empty() {
+            return Err(RoutingError::NoRoute(role.to_string()));
+        }
         Ok(chain)
     }
 
@@ -48,12 +61,16 @@ impl Router {
     pub fn report_failure(&mut self, role: &str) -> Result<ModelTarget, RoutingError> {
         let chain_len = self.chain(role)?.len();
         let idx = self.cursor.entry(role.to_string()).or_insert(0);
-        if *idx + 1 >= chain_len { return Err(RoutingError::EmptyChain(role.to_string())); }
+        if *idx + 1 >= chain_len {
+            return Err(RoutingError::EmptyChain(role.to_string()));
+        }
         *idx += 1;
         self.resolve(role)
     }
 
-    pub fn reset(&mut self, role: &str) { self.cursor.remove(role); }
+    pub fn reset(&mut self, role: &str) {
+        self.cursor.remove(role);
+    }
 }
 
 #[cfg(test)]
@@ -61,7 +78,8 @@ mod tests {
     use super::*;
 
     fn cfg() -> RoutingConfig {
-        toml::from_str(r#"
+        toml::from_str(
+            r#"
             default = [{ provider = "ollama", model = "llama3.1" }]
             [roles]
             planner = [
@@ -69,7 +87,9 @@ mod tests {
                 { provider = "openai", model = "gpt-4.1-mini" },
             ]
             executor = [{ provider = "llama-cpp", model = "qwen2.5-7b" }]
-        "#).unwrap()
+        "#,
+        )
+        .unwrap()
     }
 
     #[test]
