@@ -413,6 +413,7 @@ struct App {
     running: bool,
     exit_requested: bool,
     scroll: u16,
+    follow_bottom: bool,
     permission: Option<PermissionPrompt>,
     cancellation: Option<CancellationToken>,
     tools: ToolTimeline,
@@ -470,6 +471,7 @@ impl App {
             data_dir: options.data_dir,
             palette_selected: 0,
             palette_scroll: 0,
+            follow_bottom: true,
         }
     }
 
@@ -483,10 +485,7 @@ impl App {
         self.session_id = Some(event.session_id);
         match event.kind {
             RunEventKind::RunStarted => self.status = "running".into(),
-            RunEventKind::SystemMessage { message } => {
-                self.transcript
-                    .push(format!("SYS  {}", sanitize(&message.content, 4096)));
-            }
+            RunEventKind::SystemMessage { .. } => {}
             RunEventKind::UserMessage { message } => {
                 self.transcript
                     .push(format!("YOU  {}", sanitize(&message.content, 4096)));
@@ -544,7 +543,7 @@ impl App {
                     .push(format!("ERROR {code}: {}", sanitize(&message, 512)));
             }
         }
-        self.scroll = u16::MAX;
+        self.follow_bottom = true;
     }
 
     fn flush_streaming(&mut self) {
@@ -564,7 +563,7 @@ impl App {
         self.running = false;
         self.active_kind = None;
         self.cancellation = None;
-        self.scroll = u16::MAX;
+        self.follow_bottom = true;
         match result {
             Ok(outcome) => {
                 self.session_id = Some(outcome.session_id);
@@ -643,7 +642,7 @@ impl App {
         self.models = None;
         self.supervisors = None;
         self.status = "idle".into();
-        self.scroll = u16::MAX;
+        self.follow_bottom = true;
     }
 
     fn workflow_started(&mut self, run_id: String) {
@@ -823,8 +822,13 @@ async fn event_loop(
                 event = events.next() => {
                     match event {
                         Some(Ok(Event::Mouse(mouse))) => match mouse.kind {
-                            MouseEventKind::ScrollUp => app.scroll = app.scroll.saturating_sub(3),
-                            MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_add(3),
+                        MouseEventKind::ScrollUp => {
+                            app.scroll = app.scroll.saturating_sub(3);
+                            app.follow_bottom = false;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.scroll = app.scroll.saturating_add(3);
+                        }
                             _ => {}
                         },
                         Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
@@ -1311,9 +1315,17 @@ fn handle_key(
                 app.editor.cursor = app.editor.text.len();
             }
         }
-        KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(8),
-        KeyCode::PageDown => app.scroll = app.scroll.saturating_add(8),
-        KeyCode::End => app.scroll = u16::MAX,
+        KeyCode::PageUp => {
+            app.scroll = app.scroll.saturating_sub(8);
+            app.follow_bottom = false;
+        }
+        KeyCode::PageDown => {
+            app.scroll = app.scroll.saturating_add(8);
+        }
+        KeyCode::End => {
+            app.scroll = 0;
+            app.follow_bottom = true;
+        }
         _ => {}
     }
 }
@@ -1334,7 +1346,7 @@ fn start_run(
         app.history.push(prompt.clone());
     }
     app.history_index = None;
-    app.scroll = u16::MAX;
+    app.follow_bottom = true;
     match parse_tui_command(prompt) {
         TuiCommand::Workflows => {
             let mut dashboard = WorkflowDashboard {
@@ -1588,7 +1600,8 @@ fn start_agent_run(
     app.active_kind = Some(ActiveKind::Agent);
     app.status = "running".into();
     app.last_prompt = Some(prompt.clone());
-    app.scroll = u16::MAX;
+    app.scroll = 0;
+    app.follow_bottom = true;
     let request = RunRequest {
         prompt,
         session_id: app.session_id.clone(),
@@ -2092,16 +2105,21 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     let max_scroll = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
         .saturating_sub(visible_height);
+    let effective_scroll = if app.follow_bottom {
+        max_scroll
+    } else {
+        app.scroll.min(max_scroll)
+    };
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .block(theme::panel("Conversation"))
             .wrap(Wrap { trim: false })
-            .scroll((app.scroll.min(max_scroll), 0)),
+            .scroll((effective_scroll, 0)),
         conversation_area,
     );
     if max_scroll > 0 {
         let mut scrollbar_state =
-            ScrollbarState::new(max_scroll as usize).position(app.scroll.min(max_scroll) as usize);
+            ScrollbarState::new(max_scroll as usize).position(effective_scroll as usize);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
