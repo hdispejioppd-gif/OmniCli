@@ -21,16 +21,42 @@ pub struct RunEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunEventKind {
     RunStarted,
-    SystemMessage { message: Message },
-    UserMessage { message: Message },
-    ModelTextDelta { text: String },
-    ToolCallRequested { call: ToolCall },
-    PermissionResolved { allowed: bool, reason: String },
-    ToolFinished { call_id: String, output: ToolOutput },
-    AssistantMessage { message: Message },
-    Usage { usage: Usage },
+    SystemMessage {
+        message: Message,
+    },
+    UserMessage {
+        message: Message,
+    },
+    ModelTextDelta {
+        text: String,
+    },
+    ToolCallRequested {
+        call: ToolCall,
+    },
+    DiffPreview {
+        path: String,
+        summary: String,
+        diff: String,
+    },
+    PermissionResolved {
+        allowed: bool,
+        reason: String,
+    },
+    ToolFinished {
+        call_id: String,
+        output: ToolOutput,
+    },
+    AssistantMessage {
+        message: Message,
+    },
+    Usage {
+        usage: Usage,
+    },
     RunFinished,
-    Failed { code: String, message: String },
+    Failed {
+        code: String,
+        message: String,
+    },
 }
 
 impl RunEvent {

@@ -2,20 +2,31 @@
 
 The omni TUI follows a single design system defined in `src/theme.rs`. Every panel, label, and status glyph in the interface draws from this file — never hardcode raw colors in widgets.
 
-## Palette (Tokyo Night–inspired, truecolor)
+## Palette (“Aurora” — premium truecolor)
+
+A deep space-blue canvas with a violet→cyan brand gradient, warm amber
+highlights, and carefully stepped text tones.
 
 | Token | Role |
 | --- | --- |
-| `BG` | App background |
-| `SURFACE` | Raised surfaces (inline code background) |
-| `BORDER` / `BORDER_FOCUS` | Panel borders, resting vs. focused |
+| `BG` | App background (near-black indigo) |
+| `SURFACE` / `SURFACE_ALT` | Raised surfaces (inline code background), deeper fills |
+| `BORDER` / `BORDER_FOCUS` | Panel borders, resting vs. focused (violet) |
 | `TEXT` / `TEXT_MUTED` / `TEXT_DIM` | Content hierarchy: primary, secondary, tertiary |
-| `ACCENT` (blue) | Brand, primary highlights, omni speaker label |
-| `ACCENT_ALT` (purple) | Secondary highlights, user speaker label, provider name |
-| `SUCCESS` (green) | Completed states, diff additions |
+| `ACCENT` (violet) | Brand, primary highlights, omni speaker label |
+| `ACCENT_ALT` (cyan) | Secondary highlights, user speaker label, provider name |
+| `SUCCESS` (mint) | Completed states, diff additions |
 | `WARNING` (amber) | Running states, pending badges, permission borders |
-| `ERROR` (red) | Failures, diff removals |
-| `INFO` (cyan) | Tertiary headings, informational text |
+| `ERROR` (rose) | Failures, diff removals |
+| `INFO` (sky blue) | Tertiary headings, informational text |
+
+### Brand gradient
+
+`theme::gradient(t)` samples a violet → purple → magenta → cyan ramp for
+`t` in `0.0..=1.0`, and `theme::gradient_stops()` exposes the raw anchors. It
+powers the shimmering welcome logo (`tui_banner::welcome_lines_at`) and the
+gradient-cycled running spinner (`spinner_color()` in `src/tui.rs`), both driven
+by a wall-clock `banner_phase()` so they animate with zero extra state.
 
 ## Components
 

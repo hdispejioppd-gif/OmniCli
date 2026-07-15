@@ -15,8 +15,8 @@ use omnicli::{
     McpServer, McpServerOptions, ModelProvider, ModelSpec, OllamaProvider, OpenAiProvider,
     PluginListEntry, PluginRegistry, Policy, ProviderFactory, ProviderKind, RunEvent, RunEventKind,
     RunRequest, SqliteStore, SupervisorRuntime, ToolRegistry, WorkflowRuntime, WorktreeManager,
-    WorktreeState, agent::default_tool_context, events::EventError, register_configured_tools,
-    register_worktree_tools,
+    WorktreeState, agent::default_tool_context, events::EventError, list_configured_tools,
+    register_configured_tools, register_worktree_tools,
 };
 
 use tokio_util::sync::CancellationToken;
@@ -83,6 +83,32 @@ enum Command {
         allow_mcp_call: bool,
         #[arg(long)]
         allow_plugins: bool,
+    },
+    /// Run the agent in an automatic fix loop: run checks, repair failures, and
+    /// re-run until everything is green (implies --allow-write and --verify).
+    Fix {
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long, alias = "yolo")]
+        full_access: bool,
+        #[arg(long)]
+        allow_shell: bool,
+        #[arg(long)]
+        allow_worktree: bool,
+        #[arg(long)]
+        allow_mcp_start: bool,
+        #[arg(long)]
+        allow_mcp_call: bool,
+        #[arg(long)]
+        allow_plugins: bool,
+        /// Only fix a single ecosystem: rust, node, or python.
+        #[arg(long)]
+        ecosystem: Option<String>,
+        /// Only fix tests matching this name filter.
+        #[arg(long)]
+        filter: Option<String>,
     },
     Ask {
         prompt: String,
@@ -194,6 +220,8 @@ enum PluginCommand {
 
 #[derive(Debug, Subcommand)]
 enum McpCommand {
+    /// Connect to the configured MCP servers and list the tools they expose.
+    List,
     Serve {
         #[arg(long)]
         allow_write: bool,
@@ -309,6 +337,11 @@ impl EventSink for ConsoleSink {
             RunEventKind::RunFinished => {
                 if !self.json {
                     let _ = io::stdout().write_all(b"\n");
+                }
+            }
+            RunEventKind::DiffPreview { summary, diff, .. } => {
+                if !self.json {
+                    println!("\n\u{2500}\u{2500} preview: {summary} \u{2500}\u{2500}\n{diff}");
                 }
             }
             _ => {}
@@ -576,35 +609,60 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Command::Mcp {
-            command:
-                McpCommand::Serve {
-                    allow_write,
-                    allow_shell,
-                    verify,
-                    allow_worktree,
-                },
-        } => {
-            let policy = Policy::new(config.workspace.clone(), allow_write, allow_shell, verify)
-                .with_worktrees(allow_worktree);
-            let context = default_tool_context(
-                config.workspace.clone(),
-                config.max_tool_output_bytes,
-                config.max_file_bytes,
-                config.shell_timeout_seconds,
-            );
-            McpServer::new(
-                configured_tools(&config),
-                policy,
-                context,
-                McpServerOptions {
-                    call_timeout: std::time::Duration::from_secs(config.shell_timeout_seconds),
-                    max_message_bytes: config.mcp.max_message_bytes,
-                },
-            )
-            .serve(tokio::io::stdin(), tokio::io::stdout())
-            .await?;
-        }
+        Command::Mcp { command } => match command {
+            McpCommand::List => {
+                let listings = list_configured_tools(
+                    &config.mcp,
+                    &config.workspace,
+                    config.max_tool_output_bytes,
+                )
+                .await?;
+                if cli.json {
+                    println!("{}", serde_json::to_string(&listings)?);
+                } else if listings.is_empty() {
+                    println!(
+                        "no MCP servers configured; add a [mcp.servers.<name>] block to omni.toml"
+                    );
+                } else {
+                    for listing in &listings {
+                        println!("{}\t({})", listing.server, listing.command);
+                        if listing.tools.is_empty() {
+                            println!("  (no tools exposed)");
+                        }
+                        for tool in &listing.tools {
+                            println!("  - {}\t{}", tool.name, tool.description);
+                        }
+                    }
+                }
+            }
+            McpCommand::Serve {
+                allow_write,
+                allow_shell,
+                verify,
+                allow_worktree,
+            } => {
+                let policy =
+                    Policy::new(config.workspace.clone(), allow_write, allow_shell, verify)
+                        .with_worktrees(allow_worktree);
+                let context = default_tool_context(
+                    config.workspace.clone(),
+                    config.max_tool_output_bytes,
+                    config.max_file_bytes,
+                    config.shell_timeout_seconds,
+                );
+                McpServer::new(
+                    configured_tools(&config),
+                    policy,
+                    context,
+                    McpServerOptions {
+                        call_timeout: std::time::Duration::from_secs(config.shell_timeout_seconds),
+                        max_message_bytes: config.mcp.max_message_bytes,
+                    },
+                )
+                .serve(tokio::io::stdin(), tokio::io::stdout())
+                .await?;
+            }
+        },
         Command::Workflow {
             command:
                 WorkflowCommand::Run {
@@ -1205,11 +1263,73 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     prompt,
                     session_id: session,
                     verify,
-                    system_prompt: None,
+                    system_prompt: Some(omnicli::DEFAULT_AGENT_SYSTEM_PROMPT.to_string()),
                 },
                 allow_write,
                 allow_shell,
                 verify,
+                allow_worktree,
+                allow_mcp_start,
+                allow_mcp_call,
+                allow_plugins,
+            )
+            .await?;
+        }
+        Command::Fix {
+            prompt,
+            session,
+            full_access,
+            allow_shell,
+            allow_worktree,
+            allow_mcp_start,
+            allow_mcp_call,
+            allow_plugins,
+            ecosystem,
+            filter,
+        } => {
+            let allow_shell = allow_shell || full_access;
+            let allow_worktree = allow_worktree || full_access;
+            let allow_mcp_start = allow_mcp_start || full_access;
+            let allow_mcp_call = allow_mcp_call || full_access;
+            let allow_plugins = allow_plugins || full_access;
+            if let Some(ecosystem) = &ecosystem
+                && !matches!(ecosystem.as_str(), "rust" | "node" | "python")
+            {
+                return Err(format!(
+                    "unknown --ecosystem '{ecosystem}'; expected rust, node, or python"
+                )
+                .into());
+            }
+            let focus_args = match (&ecosystem, &filter) {
+                (Some(eco), Some(f)) => format!(
+                    " While iterating, call run_checks with {{\"ecosystem\":\"{eco}\",\"filter\":\"{f}\"}} to rerun just the relevant failing test."
+                ),
+                (Some(eco), None) => format!(
+                    " While iterating, call run_checks with {{\"ecosystem\":\"{eco}\"}} to focus that stack."
+                ),
+                (None, Some(f)) => format!(
+                    " While iterating, call run_checks with {{\"filter\":\"{f}\"}} to rerun just the relevant failing test."
+                ),
+                (None, None) => String::new(),
+            };
+            let extra = prompt
+                .map(|p| format!(" Additional guidance from the user: {p}"))
+                .unwrap_or_default();
+            let prompt = format!(
+                "Make this project's checks pass. First run run_checks to see the current state, then read the structured failures[] array and repair each problem at its file:line with the smallest safe change. Re-run checks after each round of edits and keep going until every check passes or you are genuinely blocked (explain clearly if so).{focus_args}{extra}"
+            );
+            execute_run(
+                &config,
+                cli.json,
+                RunRequest {
+                    prompt,
+                    session_id: session,
+                    verify: true,
+                    system_prompt: Some(omnicli::DEFAULT_AGENT_SYSTEM_PROMPT.to_string()),
+                },
+                true,
+                allow_shell,
+                true,
                 allow_worktree,
                 allow_mcp_start,
                 allow_mcp_call,

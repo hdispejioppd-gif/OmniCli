@@ -10,16 +10,26 @@
 
 ## Why omni
 
-| | omni | pi & other AI CLIs |
-| --- | --- | --- |
-| Framed, line-numbered, syntax-highlighted code in the transcript | ✅ | rare |
-| Live `/` command palette + `F1` key overlay | ✅ | rare |
-| Unlimited named OpenAI-compatible providers in TOML | ✅ | varies |
-| Full-access mode with a visible badge and audit trail | ✅ | often silent |
-| Workflow DAGs, supervisors, plugins, MCP — journaled in SQLite | ✅ | varies |
+omni is built to out-class the current wave of agentic CLIs — Claude Code, OpenAI
+Codex CLI, opencode, pi, aider, and friends — by folding their best ideas into
+one fast, provider-neutral, fully auditable runtime.
+
+| Capability | omni | Claude Code | Codex CLI | opencode / pi / aider |
+| --- | --- | --- | --- | --- |
+| Provider-neutral (OpenAI, Anthropic, Ollama, LM Studio, llama.cpp, any OpenAI-compatible) | ✅ | ❌ single vendor | ❌ single vendor | ⚠️ varies |
+| Runs fully offline with a deterministic `fake` provider | ✅ | ❌ | ❌ | ⚠️ rare |
+| Premium animated truecolor TUI (gradient logo + spinner, DAG dashboard) | ✅ | ⚠️ basic | ⚠️ basic | ⚠️ basic |
+| Built-in web search + fetch + **file download** | ✅ | ⚠️ partial | ⚠️ partial | ⚠️ partial |
+| Native host shell (Windows cmd/PowerShell + Unix sh) | ✅ | ✅ | ✅ | ✅ |
+| Self-verifying edit loop (`run_checks` → diagnose → fix → recheck) | ✅ | ⚠️ | ⚠️ | ⚠️ |
+| Per-capability permissions, denied by default, path-escape hard denials | ✅ | ⚠️ | ⚠️ | ⚠️ |
+| Workflow DAGs + parallel supervisors across Git worktrees | ✅ | ❌ | ❌ | ❌ |
+| Everything journaled in SQLite + NDJSON, resumable & `--json` | ✅ | ⚠️ | ⚠️ | ⚠️ |
+| Extensible via MCP servers **and** local plugins | ✅ | ⚠️ MCP only | ⚠️ | ⚠️ |
 
 - **Provider-neutral by design.** One runtime, many models: `fake` (deterministic, offline), OpenAI, Anthropic, Ollama — plus LM Studio, llama.cpp, and unlimited named OpenAI-compatible endpoints (OpenRouter, DeepSeek, Groq, vLLM, …) via `[custom_providers.*]`. Switch models mid-session without losing state.
-- **Beautiful, fast TUI.** A cohesive dark truecolor theme, rounded panels, animated status spinner, speaker-labelled transcript, syntax-highlighted markdown and code, live workflow DAG dashboard — redrawn at 30 fps.
+- **Agentic reach that closes the loop.** A full-capability system charter drives the model to explore (`repo_map`, `list_directory`, `search_code`), act (`shell`, `create_file`, `apply_patch`), reach the internet (`web_search`, `web_fetch`, `web_download`), and then *verify and fix its own work* before claiming success.
+- **Beautiful, fast TUI.** A cohesive “Aurora” truecolor theme, rounded panels, a shimmering gradient logo, a gradient-cycled status spinner, speaker-labelled transcript, syntax-highlighted markdown and code, and a live workflow DAG dashboard — redrawn at 30 fps.
 - **Security first, not bolted on.** Every capability (write, shell, MCP, plugins, worktrees) is denied by default and granted per run or per call. Path escapes are hard denials that never reach a prompt.
 - **Everything is journaled.** Sessions, messages, workflow runs, and events live in SQLite with a versioned NDJSON event stream — resumable, inspectable, machine-readable with `--json`.
 - **Parallel by default.** Independent workflow steps run concurrently; the supervisor fans out whole agents across isolated Git worktrees.
@@ -185,6 +195,17 @@ cargo run -- run --allow-plugins "plugin plugin__datetime__now::{}"
 - New files use `create_file`, which refuses to overwrite an existing path.
 - `git_status` and `git_diff` are fixed read-only operations and do not require shell permission.
 - `--verify` grants only the fixed `run_checks` capability. It detects root Rust, Node, and Python projects and runs bounded checks with direct argv execution. After a successful workspace edit, the agent validates automatically; failed output is returned to the model for another repair turn. Automated repairs still require `--allow-write`, and arbitrary shell remains separately gated by `--allow-shell`.
+
+### Web & system reach
+
+With `--allow-shell` (or `--full-access`) the agent operates the host directly and reaches the internet:
+
+- `shell` runs any host command — native cmd/PowerShell on Windows, `sh` on Unix — so the agent can drive the whole computer: file operations, process management, package managers, builds, and running programs.
+- `web_search` queries the web and returns ranked titles and URLs.
+- `web_fetch` loads a URL and returns its text with HTML stripped.
+- `web_download` saves a file from an HTTP/HTTPS URL straight into the workspace (respecting the file-size limit and refusing to overwrite).
+
+Interactive `run` and TUI sessions ship with a full-capability system charter that tells the model to use these tools proactively and to **close the loop**: after every change it verifies the result (via `run_checks`, by executing the program, or by re-reading files), and if verification fails it diagnoses, fixes, and re-checks until the task is actually done.
 
 ### Read-only modes
 

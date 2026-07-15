@@ -379,6 +379,56 @@ impl Tool for McpToolProxy {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct McpToolListing {
+    /// Namespaced name the agent uses to call this tool (mcp__<server>__<tool>).
+    pub name: String,
+    /// Original tool name as exposed by the remote MCP server.
+    pub remote_name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct McpServerListing {
+    pub server: String,
+    pub command: String,
+    pub tools: Vec<McpToolListing>,
+}
+
+/// Connect to every configured MCP server and enumerate the tools it exposes,
+/// without registering them into a running agent. Powers `omni mcp list`.
+pub async fn list_configured_tools(
+    config: &McpConfig,
+    workspace: &Path,
+    max_output_bytes: usize,
+) -> Result<Vec<McpServerListing>, McpError> {
+    let mut listings = Vec::new();
+    for (server_name, server) in &config.servers {
+        let client = McpClient::connect_process(
+            server_name.clone(),
+            server,
+            workspace,
+            config.max_message_bytes,
+            max_output_bytes,
+        )
+        .await?;
+        let mut tools = Vec::new();
+        for remote in client.list_tools().await? {
+            tools.push(McpToolListing {
+                name: format!("mcp__{server_name}__{}", remote.name),
+                remote_name: remote.name,
+                description: remote.description,
+            });
+        }
+        listings.push(McpServerListing {
+            server: server_name.clone(),
+            command: server.command.to_string_lossy().to_string(),
+            tools,
+        });
+    }
+    Ok(listings)
+}
+
 pub async fn register_configured_tools(
     registry: &mut ToolRegistry,
     config: &McpConfig,

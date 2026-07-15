@@ -32,6 +32,7 @@ hex = "0.4"
 ignore = "0.4"
 lsp-types = "0.97"
 pulldown-cmark = "0.12"
+regex = "1"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled"] }

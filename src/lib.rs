@@ -24,14 +24,17 @@ pub mod tui_palette;
 pub mod workflow;
 pub mod worktree;
 
-pub use agent::{Agent, AgentError, ProviderSwitchError, RunRequest};
+pub use agent::{Agent, AgentError, DEFAULT_AGENT_SYSTEM_PROMPT, ProviderSwitchError, RunRequest};
 pub use config::{
     AppConfig, LlamaCppConfig, LmStudioConfig, McpConfig, McpStdioServerConfig, OllamaConfig,
     OpenAiCompatibleConfig, ProviderKind,
 };
 pub use context::ContextEngine;
 pub use events::{EventSink, RunEvent, RunEventKind};
-pub use mcp::{McpServer, McpServerOptions, register_configured_tools};
+pub use mcp::{
+    McpServer, McpServerListing, McpServerOptions, McpToolListing, list_configured_tools,
+    register_configured_tools,
+};
 pub use permission::{
     AuthorizationRequest, PermissionAuthorizer, PermissionDecision, Policy, PolicyEvaluation,
 };

@@ -31,6 +31,35 @@ pub struct RunRequest {
     pub system_prompt: Option<String>,
 }
 
+/// The default, full-capability operating charter handed to the agent for
+/// interactive `run` and TUI sessions. It teaches the model to reach for every
+/// tool it has — shell (including native Windows commands), the whole file
+/// system, web search/fetch/download — and to close the loop by verifying its
+/// own work and fixing what it broke before declaring success.
+pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = concat!(
+    "You are omni, an elite autonomous software and systems agent running in a real terminal on the user's computer.\n",
+    "You are resourceful, precise, and relentless: you finish the whole task, not just the first step.\n",
+    "\n",
+    "## Capabilities — use them proactively\n",
+    "- Shell: run any command on the host through the `shell` tool. On Windows these are cmd/PowerShell commands (dir, copy, del, robocopy, tasklist, winget, powershell -Command ...); on Unix they are sh commands. Chain commands, inspect the environment, install dependencies, run builds and programs.\n",
+    "- Files: read, create, and patch any file in the workspace with `read_file`, `create_file`, and `apply_patch`. Use `repo_map`, `search_code`, and `search_files` to understand a project before editing.\n",
+    "- Internet: use `web_search` to find information, `web_fetch` to read a page as text, and `web_download` to save files (installers, datasets, assets, dependencies) from the internet directly into the workspace.\n",
+    "- Git & checks: inspect state with `git_status` and `git_diff`, and run the project's real test/lint suite with `run_checks`. It returns a structured `failures[]` array (file/line/column/message) parsed from Rust, Node, and Python output — jump straight to those locations to fix problems. Pass `{\"filter\": \"name\"}` to rerun just one failing test and `{\"ecosystem\": \"rust|node|python\"}` to focus one stack while iterating.\n",
+    "- Code intelligence: use `goto_definition`, `find_references`, `hover`, and `workspace_symbols` to navigate code semantically, and `rename_symbol` for safe project-wide renames via the language server.\n",
+    "- External integrations: tools named `mcp__<server>__<tool>` come from connected MCP servers and `plugin__<name>__<tool>` from installed plugins. Treat them as first-class capabilities — when a task maps to an available integration (issue trackers, databases, browsers, cloud APIs, etc.), prefer that dedicated tool over improvising through the shell.\n",
+    "\n",
+    "## Operating loop — always close the loop\n",
+    "1. Plan briefly, then act with tools instead of guessing.\n",
+    "2. After any change, VERIFY it: run `run_checks`, execute the program, or re-read the file to confirm the edit landed.\n",
+    "3. If verification fails, diagnose the error from the output, FIX it, and verify again. Repeat until it passes or you have exhausted reasonable options.\n",
+    "4. Prefer real evidence (command output, file contents, HTTP status) over assumptions. Never claim success you have not checked.\n",
+    "\n",
+    "## Style\n",
+    "- Be concise and concrete. Show the key commands you ran and what the results proved.\n",
+    "- Respect the workspace sandbox and the permission prompts; if a capability is denied, explain what you need and why.\n",
+    "- When a task is ambiguous, make the most reasonable assumption, state it, and proceed.",
+);
+
 pub struct RunOutcome {
     pub session_id: String,
     pub response: String,
@@ -147,6 +176,7 @@ impl Agent {
 
         let mut workspace_changed = false;
         let mut last_validation_failure = None;
+        let mut fix_attempt = 0u32;
         for _ in 0..self.max_turns {
             let model_request = ModelRequest {
                 messages: self.store.load_messages(&session_id)?,
@@ -216,8 +246,31 @@ impl Agent {
                         return Err(AgentError::NoChecksDetected);
                     }
                     if !validation.success {
+                        fix_attempt += 1;
+                        let remaining = validation
+                            .metadata
+                            .get("failure_count")
+                            .and_then(|value| value.as_u64());
+                        let progress = match remaining {
+                            Some(count) => {
+                                format!(
+                                    " (fix attempt {fix_attempt}; {count} failing check(s) remaining)"
+                                )
+                            }
+                            None => format!(" (fix attempt {fix_attempt})"),
+                        };
+                        self.emit(
+                            &sink,
+                            &session_id,
+                            &run_id,
+                            &mut sequence,
+                            RunEventKind::ModelTextDelta {
+                                text: format!("\n[auto-fix]{progress}\n"),
+                            },
+                        )
+                        .await?;
                         let feedback = format!(
-                            "Automated verification failed. Diagnose the failures below, make the smallest safe repair using available tools, and finish only when checks pass.\n\n{}",
+                            "Automated verification failed{progress}. Read the structured `failures[]` below, jump to each file:line, and make the smallest safe repair using available tools. Then let verification re-run; finish only when every check passes.\n\n{}",
                             serde_json::to_string(&validation)?
                         );
                         last_validation_failure = Some(validation.stderr.clone());
@@ -266,6 +319,20 @@ impl Agent {
                 let output = if cancelled {
                     failed_tool_output("cancelled", "run was cancelled")
                 } else if let Some(tool) = self.tools.get(&call.name) {
+                    if let Some(preview) = tool.preview(&call.arguments, &self.context) {
+                        self.emit(
+                            &sink,
+                            &session_id,
+                            &run_id,
+                            &mut sequence,
+                            RunEventKind::DiffPreview {
+                                path: preview.path,
+                                summary: preview.summary,
+                                diff: preview.diff,
+                            },
+                        )
+                        .await?;
+                    }
                     match tool.permission_request(&call.arguments) {
                         Ok(permission) => {
                             let authorization = AuthorizationRequest {

@@ -423,6 +423,7 @@ struct App {
     supervisors: Option<SupervisorDashboard>,
     usage: Usage,
     run_started: Option<std::time::Instant>,
+    stream_started: Option<std::time::Instant>,
     history: Vec<String>,
     history_index: Option<usize>,
     show_help: bool,
@@ -457,6 +458,7 @@ impl App {
             supervisors: None,
             usage: Usage::default(),
             run_started: None,
+            stream_started: None,
             history: Vec::new(),
             history_index: None,
             show_help: false,
@@ -480,6 +482,9 @@ impl App {
                     .push(format!("YOU  {}", sanitize(&message.content, 4096)));
             }
             RunEventKind::ModelTextDelta { text } => {
+                if self.streaming.is_empty() {
+                    self.stream_started = Some(std::time::Instant::now());
+                }
                 self.streaming.push_str(&sanitize(&text, 4096))
             }
             RunEventKind::ToolCallRequested { call } => {
@@ -492,6 +497,14 @@ impl App {
                     call.name,
                     sanitize(&call.arguments.to_string(), 512),
                 );
+            }
+            RunEventKind::DiffPreview { summary, diff, .. } => {
+                self.flush_streaming();
+                self.transcript
+                    .push(format!("DIFF {}", sanitize(&summary, 256)));
+                for line in sanitize(&diff, 8192).lines() {
+                    self.transcript.push(line.to_string());
+                }
             }
             RunEventKind::PermissionResolved { allowed, reason } => {
                 if let Some(item) = self.tools.last_pending_mut() {
@@ -529,6 +542,7 @@ impl App {
             self.transcript
                 .push(format!("OMNI {}", self.streaming.trim_end()));
             self.streaming.clear();
+            self.stream_started = None;
         }
     }
 
@@ -1540,7 +1554,7 @@ fn start_agent_run(
         prompt,
         session_id: app.session_id.clone(),
         verify: app.verify,
-        system_prompt: None,
+        system_prompt: Some(crate::agent::DEFAULT_AGENT_SYSTEM_PROMPT.to_string()),
     };
     let agent = agent.clone();
     let sender = sender.clone();
@@ -1891,7 +1905,10 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     );
     let mut lines = Vec::new();
     if !app.running && app.transcript.len() <= 1 {
-        lines.extend(crate::tui_banner::welcome_lines(area.width));
+        lines.extend(crate::tui_banner::welcome_lines_at(
+            area.width,
+            banner_phase(),
+        ));
         lines.push(Line::from(vec![
             Span::styled("  model ", theme::dim()),
             Span::styled(app.provider.clone(), theme::accent_bold()),
@@ -1990,7 +2007,10 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         }
     }
     if !app.streaming.is_empty() {
-        lines.push(transcript_label("omni", theme::ACCENT));
+        lines.push(transcript_label(
+            "omni",
+            fade_color(theme::ACCENT, app.stream_started),
+        ));
         lines.extend(crate::tui_markdown::render_markdown(
             &app.streaming,
             area.width,
@@ -2003,10 +2023,16 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     if app.running && app.streaming.is_empty() {
         lines.push(Line::default());
         lines.push(Line::from(vec![
-            Span::styled(format!("  {} ", spinner_glyph()), theme::accent_bold()),
+            Span::styled(
+                format!("  {} ", spinner_glyph()),
+                Style::default()
+                    .fg(spinner_color())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(app.status.clone(), theme::muted()),
             Span::styled(thinking_dots(), theme::dim()),
         ]));
+        lines.push(progress_bar_line(area.width));
     }
     let (conversation_area, tool_area) = if area.width >= 96 && !app.tools.order.is_empty() {
         let body = Layout::default()
@@ -2057,14 +2083,18 @@ fn render(frame: &mut Frame<'_>, app: &App) {
             .filter_map(|id| app.tools.items.get(id))
             .map(|item| {
                 let (glyph, glyph_style) = tool_status_glyph(item.status);
+                let name_style = if matches!(item.status, ToolStatus::Running) {
+                    Style::default()
+                        .fg(spinner_color())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD)
+                };
                 Line::from(vec![
                     Span::styled(format!("{glyph} "), glyph_style),
-                    Span::styled(
-                        format!("{:<9} ", item.name),
-                        Style::default()
-                            .fg(theme::TEXT)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(format!("{:<9} ", item.name), name_style),
                     Span::styled(
                         format!(
                             "{} {}",
@@ -2092,9 +2122,14 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         } else {
             format!("Tools · {}", app.tools.order.len())
         };
+        let tools_block = if active > 0 {
+            theme::panel_border(&tools_title, spinner_color())
+        } else {
+            theme::panel(&tools_title)
+        };
         frame.render_widget(
             Paragraph::new(tool_lines)
-                .block(theme::panel(&tools_title))
+                .block(tools_block)
                 .wrap(Wrap { trim: true }),
             tool_area,
         );
@@ -2501,7 +2536,12 @@ fn tool_status_glyph(status: ToolStatus) -> (&'static str, Style) {
     match status {
         ToolStatus::Requested => ("◌", Style::default().fg(theme::TEXT_DIM)),
         ToolStatus::Awaiting => ("◔", Style::default().fg(theme::WARNING)),
-        ToolStatus::Running => (spinner_glyph(), Style::default().fg(theme::ACCENT)),
+        ToolStatus::Running => (
+            spinner_glyph(),
+            Style::default()
+                .fg(spinner_color())
+                .add_modifier(Modifier::BOLD),
+        ),
         ToolStatus::Succeeded => ("●", Style::default().fg(theme::SUCCESS)),
         ToolStatus::Failed => ("✖", Style::default().fg(theme::ERROR)),
         ToolStatus::Interrupted => ("◒", Style::default().fg(theme::WARNING)),
@@ -2550,6 +2590,48 @@ fn spinner_glyph() -> &'static str {
     FRAMES[((millis / 80) as usize) % FRAMES.len()]
 }
 
+/// Wall-clock phase in 0.0..=1.0 that scrolls the brand gradient across the
+/// logo and other "alive" accents once every ~4 seconds.
+fn banner_phase() -> f32 {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    (millis % 4000) as f32 / 4000.0
+}
+
+/// Gradient-cycled color for the running spinner, so activity feels lively.
+fn spinner_color() -> ratatui::style::Color {
+    theme::gradient(banner_phase())
+}
+
+/// Indeterminate gradient progress bar that sweeps left-to-right. It does not
+/// track real progress — it exists to make the running state feel premium and
+/// alive, using the same wall-clock phase as the logo and spinner.
+fn progress_bar_line(width: u16) -> Line<'static> {
+    let cells = (width.saturating_sub(6)).clamp(12, 48) as usize;
+    let phase = banner_phase();
+    let mut spans = Vec::with_capacity(cells + 1);
+    spans.push(Span::raw("  "));
+    for index in 0..cells {
+        let position = index as f32 / cells as f32;
+        // Distance behind the moving head (wrapped) controls the glyph weight.
+        let trail = (phase - position).rem_euclid(1.0);
+        let glyph = if trail < 0.16 {
+            "█"
+        } else if trail < 0.32 {
+            "▓"
+        } else if trail < 0.5 {
+            "▒"
+        } else {
+            "░"
+        };
+        let color = theme::gradient((position + phase).rem_euclid(1.0));
+        spans.push(Span::styled(glyph, Style::default().fg(color)));
+    }
+    Line::from(spans)
+}
+
 /// Animated ellipsis for the live working indicator.
 fn thinking_dots() -> &'static str {
     let millis = std::time::SystemTime::now()
@@ -2562,6 +2644,15 @@ fn thinking_dots() -> &'static str {
         2 => "..",
         _ => "...",
     }
+}
+
+/// Fade a color in from the dim tone over ~450ms so freshly streamed assistant
+/// text eases into view instead of popping in abruptly.
+fn fade_color(target: Color, since: Option<std::time::Instant>) -> Color {
+    let progress = since
+        .map(|start| start.elapsed().as_millis() as f32 / 450.0)
+        .unwrap_or(1.0);
+    theme::lerp(theme::TEXT_DIM, target, progress)
 }
 
 fn centered_rect(horizontal: u16, vertical: u16, area: Rect) -> Rect {

@@ -89,7 +89,7 @@ fn severity_str(sev: Option<u64>) -> &'static str {
     }
 }
 
-fn uri_to_path(uri: &str) -> PathBuf {
+pub fn uri_to_path(uri: &str) -> PathBuf {
     let stripped = uri.strip_prefix("file:///").unwrap_or(uri);
     let decoded = stripped.replace("%3A", ":").replace("%20", " ");
     if decoded.len() > 1 && decoded.as_bytes().get(1) == Some(&b':') {
@@ -99,7 +99,7 @@ fn uri_to_path(uri: &str) -> PathBuf {
     }
 }
 
-fn path_to_uri(path: &Path) -> String {
+pub fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
     if s.starts_with('/') {
         format!("file://{s}")

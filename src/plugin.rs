@@ -658,8 +658,8 @@ entrypoint = "plugin.py"
 
         let config = PluginConfig {
             manifest: manifest_path,
-            call_timeout_seconds: 5,
-            startup_timeout_seconds: 5,
+            call_timeout_seconds: 15,
+            startup_timeout_seconds: 15,
             ..Default::default()
         };
 
