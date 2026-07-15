@@ -278,10 +278,11 @@ impl AppConfig {
                 path: global_path.clone(),
                 source,
             })?;
-            config = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+            let global: AppConfig = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
                 path: global_path.clone(),
                 source,
             })?;
+            config.merge(global);
         }
 
         // 2. Local project config: workspace/omni.toml (overrides global)
