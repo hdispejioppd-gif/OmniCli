@@ -64,6 +64,8 @@ impl ToolRegistry {
         registry
             .register(SearchFiles)
             .expect("unique built-in tool");
+        registry.register(WebFetch).expect("unique built-in tool");
+        registry.register(WebSearch).expect("unique built-in tool");
         registry
     }
 
@@ -1334,6 +1336,233 @@ impl Tool for SearchFiles {
     }
 }
 
+struct WebFetch;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebFetchArgs {
+    url: String,
+    #[serde(default = "default_max_web_bytes")]
+    max_bytes: usize,
+}
+
+fn default_max_web_bytes() -> usize {
+    256 * 1024
+}
+
+#[async_trait]
+impl Tool for WebFetch {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "web_fetch".into(),
+            description:
+                "Fetch content from a URL (HTTP/HTTPS). Returns text with HTML tags stripped."
+                    .into(),
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["url"],
+                "properties": {
+                    "url": { "type": "string", "minLength": 1, "description": "HTTP or HTTPS URL" },
+                    "max_bytes": { "type": "integer", "default": 262144, "description": "Maximum bytes to return" }
+                }
+            }),
+        }
+    }
+
+    fn permission_request(&self, _arguments: &Value) -> Result<PermissionRequest, ToolError> {
+        Ok(PermissionRequest::Shell {
+            command: "web_fetch".into(),
+        })
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let args: WebFetchArgs = serde_json::from_value(arguments)?;
+        let max = args.max_bytes.min(context.max_output_bytes.max(262144));
+        let client = reqwest::Client::builder()
+            .timeout(context.shell_timeout)
+            .build()
+            .map_err(|e| ToolError::Git(e.to_string()))?;
+        let resp = client
+            .get(&args.url)
+            .header("User-Agent", "omni-cli/0.1")
+            .send()
+            .await
+            .map_err(|e| ToolError::Git(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Ok(ToolOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: format!("HTTP {status}"),
+                truncated: false,
+                metadata: json!({"url": args.url, "status": status.as_u16()}),
+            });
+        }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| ToolError::Git(e.to_string()))?;
+        let content = strip_html(&body);
+        let (text, truncated) = if content.len() > max {
+            (content[..max].to_string(), true)
+        } else {
+            (content, false)
+        };
+        Ok(ToolOutput {
+            success: true,
+            stdout: text,
+            stderr: String::new(),
+            truncated,
+            metadata: json!({"url": args.url, "status": status.as_u16()}),
+        })
+    }
+}
+
+fn strip_html(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+struct WebSearch;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebSearchArgs {
+    query: String,
+    #[serde(default = "default_search_results")]
+    max_results: usize,
+}
+
+fn default_search_results() -> usize {
+    10
+}
+
+#[async_trait]
+impl Tool for WebSearch {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "web_search".into(),
+            description: "Search the web via DuckDuckGo. Returns titles and URLs of results."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "minLength": 1 },
+                    "max_results": { "type": "integer", "default": 10 }
+                }
+            }),
+        }
+    }
+
+    fn permission_request(&self, _arguments: &Value) -> Result<PermissionRequest, ToolError> {
+        Ok(PermissionRequest::Shell {
+            command: "web_search".into(),
+        })
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let args: WebSearchArgs = serde_json::from_value(arguments)?;
+        let client = reqwest::Client::builder()
+            .timeout(context.shell_timeout)
+            .build()
+            .map_err(|e| ToolError::Git(e.to_string()))?;
+        let resp = client
+            .get("https://html.duckduckgo.com/html/")
+            .query(&[("q", args.query.as_str())])
+            .header("User-Agent", "omni-cli/0.1")
+            .send()
+            .await
+            .map_err(|e| ToolError::Git(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Ok(ToolOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: format!("HTTP {status}"),
+                truncated: false,
+                metadata: json!({"query": args.query, "status": status.as_u16()}),
+            });
+        }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| ToolError::Git(e.to_string()))?;
+        let results = parse_ddg_results(&body, args.max_results);
+        let output = results
+            .iter()
+            .enumerate()
+            .map(|(i, (title, url))| format!("{}. {title}\n   {url}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(ToolOutput {
+            success: true,
+            stdout: output,
+            stderr: String::new(),
+            truncated: false,
+            metadata: json!({"query": args.query, "count": results.len()}),
+        })
+    }
+}
+
+fn parse_ddg_results(html: &str, max: usize) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let mut rest = html;
+    while results.len() < max {
+        let Some(start) = rest.find("class=\"result__a\"") else {
+            break;
+        };
+        rest = &rest[start..];
+        let href_start = rest.find("href=\"").map(|p| p + 6);
+        let href_end = href_start.and_then(|s| rest[s..].find('"').map(|e| s + e));
+        let title_start = rest.find('>').map(|p| p + 1);
+        let title_end = title_start.and_then(|s| rest[s..].find("</a>").map(|e| s + e));
+        if let (Some(hs), Some(he), Some(ts), Some(te)) =
+            (href_start, href_end, title_start, title_end)
+        {
+            let url = strip_html(&rest[hs..he]);
+            let title = strip_html(&rest[ts..te]);
+            if !title.is_empty() {
+                results.push((title, url));
+            }
+            rest = &rest[te..];
+        } else {
+            break;
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1417,6 +1646,28 @@ mod tests {
         assert!(validate_relative_path(Path::new("")).is_err());
         assert!(validate_relative_path(Path::new("../outside")).is_err());
         assert!(validate_relative_path(Path::new("src/lib.rs")).is_ok());
+    }
+
+    #[test]
+    fn strip_html_removes_tags_and_entities() {
+        let html = "<p>Hello <b>world</b> &amp; goodbye</p>";
+        assert_eq!(strip_html(html), "Hello world & goodbye");
+    }
+
+    #[test]
+    fn parse_ddg_results_extracts_titles_and_urls() {
+        let html = r#"
+        <div>
+            <a class="result__a" href="https://example.com/foo">Foo Bar</a>
+        </div>
+        <div>
+            <a class="result__a" href="https://example.com/baz">Baz Qux</a>
+        </div>
+        "#;
+        let results = parse_ddg_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "Foo Bar");
+        assert_eq!(results[1].0, "Baz Qux");
     }
 
     #[test]

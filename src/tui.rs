@@ -54,6 +54,7 @@ pub struct TuiOptions {
     pub full_access: bool,
     pub initial_model: ModelSpec,
     pub available_models: Vec<ModelSpec>,
+    pub data_dir: std::path::PathBuf,
 }
 
 pub struct PermissionPrompt {
@@ -426,6 +427,9 @@ struct App {
     history_index: Option<usize>,
     show_help: bool,
     full_access: bool,
+    queued: Vec<String>,
+    last_prompt: Option<String>,
+    data_dir: std::path::PathBuf,
 }
 
 impl App {
@@ -457,6 +461,9 @@ impl App {
             history_index: None,
             show_help: false,
             full_access: options.full_access,
+            queued: Vec::new(),
+            last_prompt: None,
+            data_dir: options.data_dir,
         }
     }
 
@@ -807,8 +814,7 @@ async fn event_loop(
                                 &backend_sender,
                             );
                         }
-                        Some(Ok(Event::Paste(text))) if !app.running
-                            && app.permission.is_none()
+                        Some(Ok(Event::Paste(text))) if app.permission.is_none()
                             && app.sessions.is_none()
                             && app.models.is_none() => {
                             app.editor.insert(&text);
@@ -822,7 +828,13 @@ async fn event_loop(
                 event = backend_receiver.recv() => {
                     match event {
                         Some(BackendEvent::Run(event)) => app.handle_run_event(event),
-                        Some(BackendEvent::Complete(result)) => app.complete(result),
+                        Some(BackendEvent::Complete(result)) => {
+                            app.complete(result);
+                            if !app.running && !app.queued.is_empty() {
+                                let next = app.queued.remove(0);
+                                start_agent_run(&mut app, &agent, &backend_sender, next);
+                            }
+                        }
                         Some(BackendEvent::WorkflowStarted(run_id)) => app.workflow_started(run_id),
                         Some(BackendEvent::WorkflowSnapshot(result)) => app.workflow_snapshot(result),
                         Some(BackendEvent::WorkflowComplete(result)) => app.workflow_complete(result),
@@ -1161,6 +1173,18 @@ fn handle_key(
         KeyCode::Enter if !app.running => {
             start_run(app, agent, workflows, supervisors, provider_factory, sender)
         }
+        KeyCode::Enter if app.running && key.modifiers.contains(KeyModifiers::ALT) => {
+            app.editor.insert("\n");
+        }
+        KeyCode::Enter if app.running => {
+            let text = app.editor.take();
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                app.transcript.push(format!("QUEUED {text}"));
+                app.queued.push(text);
+                app.status = format!("queued {} message(s)", app.queued.len());
+            }
+        }
         KeyCode::Esc if app.running => {
             if let Some(cancellation) = &app.cancellation {
                 cancellation.cancel();
@@ -1176,8 +1200,8 @@ fn handle_key(
         {
             app.editor.delete_word_back();
         }
-        KeyCode::Backspace if !app.running => app.editor.backspace(),
-        KeyCode::Delete if !app.running => app.editor.delete(),
+        KeyCode::Backspace => app.editor.backspace(),
+        KeyCode::Delete => app.editor.delete(),
         KeyCode::Left
             if !app.running
                 && (key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1185,7 +1209,7 @@ fn handle_key(
         {
             app.editor.move_word_left();
         }
-        KeyCode::Left if !app.running => app.editor.move_left(),
+        KeyCode::Left => app.editor.move_left(),
         KeyCode::Right
             if !app.running
                 && (key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1193,28 +1217,26 @@ fn handle_key(
         {
             app.editor.move_word_right();
         }
-        KeyCode::Right if !app.running => app.editor.move_right(),
+        KeyCode::Right => app.editor.move_right(),
         KeyCode::Home if !app.running => app.editor.home(),
         KeyCode::End if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.editor.cursor = app.editor.text.len();
         }
         KeyCode::End if !app.running => app.editor.end(),
         KeyCode::Tab if !app.running => app.editor.insert("\t"),
-        KeyCode::Char('a') if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.editor.home();
         }
-        KeyCode::Char('e') if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.editor.end();
         }
-        KeyCode::Char('u') if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.editor.clear();
         }
-        KeyCode::Char('k') if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.editor.text.truncate(app.editor.cursor);
         }
-        KeyCode::Char(character)
-            if !app.running && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.editor.insert(&character.to_string());
         }
         KeyCode::Up if !app.running && !app.history.is_empty() => {
@@ -1347,6 +1369,24 @@ fn start_run(
             app.reset_session();
             app.status = "new session".into();
         }
+        TuiCommand::Yolo => {
+            app.full_access = !app.full_access;
+            if app.full_access {
+                app.transcript.push(
+                    "⚠ full access ON — every tool call is auto-approved (/yolo to turn off)"
+                        .into(),
+                );
+                app.status = "full access on".into();
+            } else {
+                app.transcript
+                    .push("○ full access OFF — permission prompts are back".into());
+                app.status = "full access off".into();
+            }
+        }
+        TuiCommand::Retry => match app.last_prompt.clone() {
+            Some(prompt) => start_agent_run(app, agent, sender, prompt),
+            None => app.status = "nothing to retry yet".into(),
+        },
         TuiCommand::Invalid(message) => {
             app.status = message.into();
         }
@@ -1366,6 +1406,8 @@ enum TuiCommand {
     Help,
     Export,
     Clear,
+    Yolo,
+    Retry,
     Invalid(&'static str),
     Agent(String),
 }
@@ -1389,6 +1431,12 @@ fn parse_tui_command(prompt: String) -> TuiCommand {
     }
     if matches!(trimmed, "/clear" | "/new") {
         return TuiCommand::Clear;
+    }
+    if matches!(trimmed, "/yolo" | "/full-access") {
+        return TuiCommand::Yolo;
+    }
+    if trimmed == "/retry" {
+        return TuiCommand::Retry;
     }
     if let Some(path) = trimmed.strip_prefix("/supervisor run ") {
         return if path.trim().is_empty() {
@@ -1459,6 +1507,9 @@ fn switch_model(app: &mut App, agent: &Agent, factory: &ProviderFactory, spec: M
             app.models = None;
             app.status = "model switched".into();
             app.transcript.push(format!("MODEL {}", app.provider));
+            if std::fs::create_dir_all(&app.data_dir).is_ok() {
+                let _ = std::fs::write(app.data_dir.join("last_model"), &app.provider);
+            }
         }
         Err(error) => {
             app.status = "model switch failed".into();
@@ -1484,6 +1535,7 @@ fn start_agent_run(
     app.run_started = Some(std::time::Instant::now());
     app.active_kind = Some(ActiveKind::Agent);
     app.status = "running".into();
+    app.last_prompt = Some(prompt.clone());
     let request = RunRequest {
         prompt,
         session_id: app.session_id.clone(),
@@ -1801,7 +1853,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     if app.full_access {
         header_spans.push(Span::styled("  │  ", theme::dim()));
         header_spans.push(Span::styled(
-            " FULL ACCESS ",
+            " ⚡ FULL ACCESS ",
             Style::default()
                 .fg(theme::BG)
                 .bg(theme::WARNING)
@@ -1840,6 +1892,21 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     let mut lines = Vec::new();
     if !app.running && app.transcript.len() <= 1 {
         lines.extend(crate::tui_banner::welcome_lines(area.width));
+        lines.push(Line::from(vec![
+            Span::styled("  model ", theme::dim()),
+            Span::styled(app.provider.clone(), theme::accent_bold()),
+            Span::styled("   ·   full access ", theme::dim()),
+            Span::styled(
+                if app.full_access { "on" } else { "off" },
+                if app.full_access {
+                    theme::warning()
+                } else {
+                    theme::muted()
+                },
+            ),
+            Span::styled("   ·   /yolo toggles", theme::dim()),
+        ]));
+        lines.push(Line::default());
     }
     for line in &app.transcript {
         if let Some(content) = line.strip_prefix("OMNI ") {
@@ -1889,8 +1956,35 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                 ),
             ]));
             lines.push(Line::default());
+        } else if let Some(content) = line.strip_prefix("QUEUED ") {
+            lines.push(Line::from(vec![
+                Span::styled("  ▸ queued ", theme::warning()),
+                Span::styled(content.to_string(), theme::muted()),
+            ]));
+        } else if let Some(content) = line.strip_prefix("ERROR ") {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                "  ✖ error",
+                Style::default()
+                    .fg(theme::ERROR)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("    {content}"),
+                theme::error(),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("    hint ", theme::warning()),
+                Span::styled(
+                    "run `omni doctor`, /model to switch provider, /clear for a fresh session",
+                    theme::dim(),
+                ),
+            ]));
+            lines.push(Line::default());
         } else if line.contains("ERROR") {
             lines.push(Line::from(Span::styled(line.clone(), theme::error())));
+        } else if line.starts_with('⚠') {
+            lines.push(Line::from(Span::styled(line.clone(), theme::warning())));
         } else {
             lines.push(Line::from(Span::styled(line.clone(), theme::dim())));
         }
@@ -1905,6 +1999,14 @@ fn render(frame: &mut Frame<'_>, app: &App) {
             if blink_on() { "▍" } else { " " },
             theme::accent(),
         )));
+    }
+    if app.running && app.streaming.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", spinner_glyph()), theme::accent_bold()),
+            Span::styled(app.status.clone(), theme::muted()),
+            Span::styled(thinking_dots(), theme::dim()),
+        ]));
     }
     let (conversation_area, tool_area) = if area.width >= 96 && !app.tools.order.is_empty() {
         let body = Layout::default()
@@ -2005,6 +2107,14 @@ fn render(frame: &mut Frame<'_>, app: &App) {
                 theme::dim().add_modifier(Modifier::ITALIC),
             ),
         ]))
+    } else if app.editor.text.is_empty() && app.running {
+        Paragraph::new(Line::from(vec![
+            Span::styled("▏", theme::accent()),
+            Span::styled(
+                "Type your next message — ↵ queues it while omni works",
+                theme::dim().add_modifier(Modifier::ITALIC),
+            ),
+        ]))
     } else {
         Paragraph::new(app.editor.display_with_cursor())
     };
@@ -2025,7 +2135,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(key_hints(&[
-            ("↵", "send"),
+            ("↵", "send · queue"),
             ("↑", "history"),
             ("^P", "models"),
             ("^L", "sessions"),
@@ -2440,6 +2550,20 @@ fn spinner_glyph() -> &'static str {
     FRAMES[((millis / 80) as usize) % FRAMES.len()]
 }
 
+/// Animated ellipsis for the live working indicator.
+fn thinking_dots() -> &'static str {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    match (millis / 400) % 4 {
+        0 => "",
+        1 => ".",
+        2 => "..",
+        _ => "...",
+    }
+}
+
 fn centered_rect(horizontal: u16, vertical: u16, area: Rect) -> Rect {
     let vertical_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2636,6 +2760,7 @@ mod tests {
             metadata: serde_json::json!({}),
         };
         let mut app = App::new(TuiOptions {
+            data_dir: std::path::PathBuf::new(),
             session_id: None,
             verify: false,
             full_access: false,
@@ -2676,6 +2801,7 @@ mod tests {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).unwrap();
             let mut app = App::new(TuiOptions {
+                data_dir: std::path::PathBuf::new(),
                 session_id: None,
                 verify: false,
                 full_access: false,
@@ -2735,6 +2861,9 @@ mod tests {
         assert_eq!(parse_tui_command("/export".into()), TuiCommand::Export);
         assert_eq!(parse_tui_command("/clear".into()), TuiCommand::Clear);
         assert_eq!(parse_tui_command("/new".into()), TuiCommand::Clear);
+        assert_eq!(parse_tui_command("/yolo".into()), TuiCommand::Yolo);
+        assert_eq!(parse_tui_command("/full-access".into()), TuiCommand::Yolo);
+        assert_eq!(parse_tui_command("/retry".into()), TuiCommand::Retry);
         assert_eq!(
             parse_tui_command("/model openai/test".into()),
             TuiCommand::Model("openai/test".into())
@@ -2827,6 +2956,7 @@ mod tests {
             timeout: Duration::from_secs(5),
         };
         let mut app = App::new(TuiOptions {
+            data_dir: std::path::PathBuf::new(),
             session_id: None,
             verify: false,
             full_access: false,

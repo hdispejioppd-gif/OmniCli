@@ -502,9 +502,9 @@ impl AppConfig {
                     "invalid MCP server id: {name}"
                 )));
             }
-            if !server.command.is_absolute() {
+            if server.command.as_os_str().is_empty() {
                 return Err(ConfigError::Invalid(format!(
-                    "MCP server {name} command must be absolute"
+                    "MCP server {name} command must not be empty"
                 )));
             }
             if server.startup_timeout_seconds == 0 || server.call_timeout_seconds == 0 {
@@ -847,21 +847,28 @@ n_predict = 512
     }
 
     #[test]
-    fn mcp_config_rejects_relative_commands_and_secret_maps() {
-        let relative = toml::from_str::<AppConfig>(
+    fn mcp_config_rejects_empty_commands_and_secret_maps() {
+        let empty = toml::from_str::<AppConfig>(
             r#"
 [mcp.servers.bad]
-command = "server"
+command = ""
 "#,
         )
         .unwrap();
-        assert!(
-            relative
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("absolute")
-        );
+        assert!(empty.validate().unwrap_err().to_string().contains("empty"));
+
+        let relative = toml::from_str::<AppConfig>(
+            r#"
+[mcp.servers.ok]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+env = ["PATH"]
+startup_timeout_seconds = 30
+call_timeout_seconds = 30
+"#,
+        )
+        .unwrap();
+        assert!(relative.validate().is_ok());
 
         let secret = toml::from_str::<AppConfig>(
             r#"

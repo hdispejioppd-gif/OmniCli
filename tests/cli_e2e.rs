@@ -706,7 +706,9 @@ fn tools_lists_builtin_tools() {
         .success()
         .stdout(predicate::str::contains("read_file"))
         .stdout(predicate::str::contains("apply_patch"))
-        .stdout(predicate::str::contains("search_files"));
+        .stdout(predicate::str::contains("search_files"))
+        .stdout(predicate::str::contains("web_fetch"))
+        .stdout(predicate::str::contains("web_search"));
 
     omni(&temp)
         .args(["tools"])
@@ -714,7 +716,9 @@ fn tools_lists_builtin_tools() {
         .success()
         .stdout(predicate::str::contains("read_file\t"))
         .stdout(predicate::str::contains("apply_patch\t"))
-        .stdout(predicate::str::contains("search_files\t"));
+        .stdout(predicate::str::contains("search_files\t"))
+        .stdout(predicate::str::contains("web_fetch\t"))
+        .stdout(predicate::str::contains("web_search\t"));
 }
 
 #[test]

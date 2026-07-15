@@ -9,3 +9,4 @@ __pycache__/
 *.pyc
 docs/.obsidian/
 omni.toml
+last_model

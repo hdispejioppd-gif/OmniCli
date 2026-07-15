@@ -266,8 +266,14 @@ impl ModelProvider for FakeProvider {
                 tool_events("repo_map", json!({}))
             } else if let Some(query) = prompt.strip_prefix("search_code ") {
                 tool_events("search_code", json!({ "query": query.trim() }))
+            } else if let Some(query) = prompt.strip_prefix("search_files ") {
+                tool_events("search_files", json!({ "query": query.trim() }))
             } else if let Some(query) = prompt.strip_prefix("search ") {
                 tool_events("search_files", json!({ "query": query.trim() }))
+            } else if let Some(query) = prompt.strip_prefix("web_search ") {
+                tool_events("web_search", json!({ "query": query.trim() }))
+            } else if let Some(url) = prompt.strip_prefix("fetch ") {
+                tool_events("web_fetch", json!({ "url": url.trim() }))
             } else if let Some(rest) = prompt.strip_prefix("mcp ") {
                 let (name, arguments) = rest.split_once("::").ok_or_else(|| {
                     ProviderError::InvalidPrompt(

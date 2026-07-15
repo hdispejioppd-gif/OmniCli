@@ -24,6 +24,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/help", "toggle the keyboard help overlay"),
     ("/export", "save this session transcript to markdown"),
     ("/clear", "start a fresh session (also /new)"),
+    ("/yolo", "toggle full access — auto-approve every tool"),
+    ("/retry", "run the last prompt again"),
 ];
 
 /// Keyboard reference shown in the F1 overlay.

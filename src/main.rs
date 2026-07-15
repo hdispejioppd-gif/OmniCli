@@ -346,6 +346,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(workspace) = cli.workspace {
         config.workspace = canonicalize_boundary(&workspace);
     }
+    // Compute explicit_model before provider/model are moved below.
+    let explicit_model = cli.provider.is_some() || cli.model.is_some() || cli.profile.is_some();
     if let Some(provider) = cli.provider {
         config.provider = match provider.as_str() {
             "openai" => ProviderKind::OpenAi,
@@ -747,6 +749,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ProviderKind::LlamaCpp => llama_cpp_model.clone(),
                 ProviderKind::OpenAiCompatible => openai_compatible_model.clone(),
             };
+            // Restore the model picked last time in the TUI, unless the user
+            // explicitly selected one via --provider/--model/--profile.
+            let initial_model = if explicit_model {
+                initial_model
+            } else if let Ok(saved) = fs::read_to_string(config.data_dir.join("last_model")) {
+                let saved = saved.trim().to_string();
+                let mut candidates: Vec<ModelSpec> = vec![
+                    ModelSpec::Fake,
+                    openai_model.clone(),
+                    anthropic_model.clone(),
+                    ollama_model.clone(),
+                    lm_studio_model.clone(),
+                    llama_cpp_model.clone(),
+                    openai_compatible_model.clone(),
+                ];
+                candidates.extend(custom_models.clone());
+                candidates
+                    .into_iter()
+                    .find(|model| model.selector() == saved)
+                    .unwrap_or(initial_model)
+            } else {
+                initial_model
+            };
             let provider_factory = Arc::new(ProviderFactory::from_env());
             let provider = provider_factory.build(&initial_model)?;
             let policy = Policy::new(config.workspace.clone(), allow_write, allow_shell, verify)
@@ -813,6 +838,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     verify,
                     full_access,
                     initial_model,
+                    data_dir: config.data_dir.clone(),
                     available_models: {
                         let mut models = vec![
                             ModelSpec::Fake,
@@ -1067,6 +1093,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 # [custom_providers.vllm]
 # base_url = "http://localhost:8000/v1"
 # model = "qwen2.5-coder"
+
+# MCP servers (commands from PATH are allowed):
+# [mcp.servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# env = ["PATH", "SystemRoot"]
+# startup_timeout_seconds = 30
+# call_timeout_seconds = 60
 "##;
             if let Err(error) = std::fs::write(&path, template) {
                 return Err(format!("failed to write {}: {error}", path.display()).into());

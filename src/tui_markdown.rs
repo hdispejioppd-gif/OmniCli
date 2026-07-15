@@ -268,7 +268,12 @@ pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
 }
 
 fn syntect_to_ratatui(color: syntect::highlighting::Color) -> Color {
-    Color::Rgb(color.r, color.g, color.b)
+    // Monochrome UI: map syntax colors to grayscale by perceived luminance,
+    // keeping token contrast without introducing hue.
+    let luma =
+        0.2126 * f32::from(color.r) + 0.7152 * f32::from(color.g) + 0.0722 * f32::from(color.b);
+    let level = luma.round().clamp(0.0, 255.0) as u8;
+    Color::Rgb(level, level, level)
 }
 
 #[cfg(test)]

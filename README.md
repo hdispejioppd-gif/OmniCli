@@ -108,9 +108,13 @@ The TUI streams model output, preserves and continues SQLite sessions, shows liv
 /help
 /export
 /clear
+/yolo
+/retry
 ```
 
 Type `/` in the prompt to see the live command palette; `/export` writes the current transcript to `omni-session-<id>.md` in the working directory.
+
+You can keep typing while omni is working — press ↵ to queue the next message and it is sent automatically when the current turn finishes. `/retry` re-runs the last prompt.
 
 The workflow dashboard polls the SQLite journal while a local workflow is active and shows step status, tool, attempts, and dependency edges. `Tab` or `Right` focuses steps; the selected step displays declared/captured artifacts, complete SHA-256 values, errors, and bounded stdout/stderr. Use `r` to resume the selected run, `n` to prepare a new workflow path, `c` to cancel the workflow owned by this TUI, and `Ctrl+R` to refresh persisted state.
 
@@ -119,6 +123,8 @@ Model switching is allowed only while idle and keeps the current SQLite session,
 TUI mode requires interactive stdin and stdout. `--json tui` and redirected terminals are rejected before raw mode begins.
 
 ## Configuration
+
+omni remembers the last model you picked in the TUI (stored as `last_model` in the data dir) and restores it on the next launch, unless you explicitly pass `--provider`, `--model`, or `--profile`.
 
 Create `omni.toml` in the workspace or pass `--config <path>`:
 
@@ -164,7 +170,7 @@ CLI flags override path settings.
 
 ## Permissions & safety model
 
-> **Full access mode.** `omni tui --full-access` / `omni run --full-access` (alias `--yolo`) grants every capability (write, shell, MCP, plugins, worktrees) for the session and auto-approves all remaining permission prompts. The header shows a `FULL ACCESS` badge and every auto-approval is logged to the transcript. Use it only in workspaces you fully trust.
+> **Full access mode.** `omni tui --full-access` / `omni run --full-access` (alias `--yolo`), or toggle live from inside the TUI with the `/yolo` slash command grants every capability (write, shell, MCP, plugins, worktrees) for the session and auto-approves all remaining permission prompts. The header shows a `FULL ACCESS` badge and every auto-approval is logged to the transcript. Use it only in workspaces you fully trust.
 
 Writes and shell execution are denied unless explicitly enabled for the run:
 

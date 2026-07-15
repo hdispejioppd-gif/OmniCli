@@ -7,24 +7,24 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders};
 
 // ─── Palette ────────────────────────────────────────────────────────────────
-// Deep, modern dark palette (Tokyo Night inspired). Works on both dark
-// terminals and truecolor-capable emulators.
+// Monochrome palette — pure black & white with carefully stepped grays.
+// High contrast, zero hue: a premium engineering-tool aesthetic.
 
-pub const BG: Color = Color::Rgb(0x16, 0x16, 0x1e);
-pub const SURFACE: Color = Color::Rgb(0x2a, 0x2f, 0x45);
-pub const BORDER: Color = Color::Rgb(0x3b, 0x42, 0x61);
-pub const BORDER_FOCUS: Color = Color::Rgb(0x7a, 0xa2, 0xf7);
+pub const BG: Color = Color::Rgb(0x0a, 0x0a, 0x0a);
+pub const SURFACE: Color = Color::Rgb(0x1a, 0x1a, 0x1a);
+pub const BORDER: Color = Color::Rgb(0x30, 0x30, 0x30);
+pub const BORDER_FOCUS: Color = Color::Rgb(0x9e, 0x9e, 0x9e);
 
-pub const TEXT: Color = Color::Rgb(0xc0, 0xca, 0xf5);
-pub const TEXT_MUTED: Color = Color::Rgb(0x9a, 0xa5, 0xce);
-pub const TEXT_DIM: Color = Color::Rgb(0x56, 0x5f, 0x89);
+pub const TEXT: Color = Color::Rgb(0xea, 0xea, 0xea);
+pub const TEXT_MUTED: Color = Color::Rgb(0xa0, 0xa0, 0xa0);
+pub const TEXT_DIM: Color = Color::Rgb(0x5e, 0x5e, 0x5e);
 
-pub const ACCENT: Color = Color::Rgb(0x7a, 0xa2, 0xf7); // blue
-pub const ACCENT_ALT: Color = Color::Rgb(0xbb, 0x9a, 0xf7); // purple
-pub const SUCCESS: Color = Color::Rgb(0x9e, 0xce, 0x6a); // green
-pub const WARNING: Color = Color::Rgb(0xe0, 0xaf, 0x68); // amber
-pub const ERROR: Color = Color::Rgb(0xf7, 0x76, 0x8e); // red
-pub const INFO: Color = Color::Rgb(0x7d, 0xcf, 0xff); // cyan
+pub const ACCENT: Color = Color::Rgb(0xff, 0xff, 0xff); // pure white
+pub const ACCENT_ALT: Color = Color::Rgb(0xd4, 0xd4, 0xd4); // light gray
+pub const SUCCESS: Color = Color::Rgb(0xc4, 0xc4, 0xc4); // light gray
+pub const WARNING: Color = Color::Rgb(0xe8, 0xe8, 0xe8); // bright gray
+pub const ERROR: Color = Color::Rgb(0xff, 0xff, 0xff); // white — paired with ✖/bold for emphasis
+pub const INFO: Color = Color::Rgb(0xb0, 0xb0, 0xb0); // mid gray
 
 // ─── Reusable styles ────────────────────────────────────────────────────────
 
