@@ -431,6 +431,8 @@ struct App {
     queued: Vec<String>,
     last_prompt: Option<String>,
     data_dir: std::path::PathBuf,
+    palette_selected: usize,
+    palette_scroll: usize,
 }
 
 impl App {
@@ -466,7 +468,15 @@ impl App {
             queued: Vec::new(),
             last_prompt: None,
             data_dir: options.data_dir,
+            palette_selected: 0,
+            palette_scroll: 0,
         }
+    }
+
+    fn palette_visible(&self) -> bool {
+        let trimmed = self.editor.text.trim_start();
+        trimmed.starts_with('/')
+            && !crate::tui_palette::filter_commands(&self.editor.text).is_empty()
     }
 
     fn handle_run_event(&mut self, event: RunEvent) {
@@ -1214,7 +1224,10 @@ fn handle_key(
         {
             app.editor.delete_word_back();
         }
-        KeyCode::Backspace => app.editor.backspace(),
+        KeyCode::Backspace => {
+            app.editor.backspace();
+            app.palette_selected = 0;
+        }
         KeyCode::Delete => app.editor.delete(),
         KeyCode::Left
             if !app.running
@@ -1252,6 +1265,29 @@ fn handle_key(
         }
         KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.editor.insert(&character.to_string());
+            app.palette_selected = 0;
+        }
+        KeyCode::Up if !app.running && app.palette_visible() => {
+            if app.palette_selected > 0 {
+                app.palette_selected -= 1;
+            }
+            let count = crate::tui_palette::filter_commands(&app.editor.text).len();
+            crate::tui_palette::ensure_visible(
+                app.palette_selected,
+                &mut app.palette_scroll,
+                count,
+            );
+        }
+        KeyCode::Down if !app.running && app.palette_visible() => {
+            let count = crate::tui_palette::filter_commands(&app.editor.text).len();
+            if app.palette_selected + 1 < count {
+                app.palette_selected += 1;
+            }
+            crate::tui_palette::ensure_visible(
+                app.palette_selected,
+                &mut app.palette_scroll,
+                count,
+            );
         }
         KeyCode::Up if !app.running && !app.history.is_empty() => {
             let next_index = match app.history_index {
@@ -2457,7 +2493,13 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         );
     }
     if !app.running && app.permission.is_none() && app.editor.text.trim_start().starts_with('/') {
-        crate::tui_palette::render_palette(frame, chunks[2], &app.editor.text);
+        crate::tui_palette::render_palette(
+            frame,
+            chunks[2],
+            &app.editor.text,
+            app.palette_selected,
+            app.palette_scroll,
+        );
     }
     if app.show_help {
         crate::tui_palette::render_help(frame, area);

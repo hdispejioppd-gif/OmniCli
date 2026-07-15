@@ -101,29 +101,66 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
 ///
 /// Call this only while the user is typing a `/`-prefixed prompt. Does
 /// nothing when no command matches.
-pub fn render_palette(frame: &mut Frame, prompt_area: Rect, input: &str) {
+pub fn render_palette(
+    frame: &mut Frame,
+    prompt_area: Rect,
+    input: &str,
+    selected: usize,
+    scroll: usize,
+) {
     let matches = filter_commands(input);
     if matches.is_empty() {
         return;
     }
-    let height = (matches.len() as u16).saturating_add(2).min(9);
+    let max_visible = 7usize;
+    let visible_count = matches.len().min(max_visible);
+    let height = (visible_count as u16).saturating_add(2);
     let width = prompt_area.width.min(64);
     let y = prompt_area.y.saturating_sub(height);
     let popup = Rect::new(prompt_area.x, y, width, height);
     frame.render_widget(Clear, popup);
     let lines: Vec<Line<'static>> = matches
         .iter()
-        .map(|(command, description)| {
+        .skip(scroll)
+        .take(max_visible)
+        .enumerate()
+        .map(|(idx, (command, description))| {
+            let is_selected = idx + scroll == selected;
+            let prefix = if is_selected { "▸ " } else { "  " };
+            let cmd_style = if is_selected {
+                theme::accent_bold()
+            } else {
+                theme::dim()
+            };
+            let desc_style = if is_selected {
+                theme::text()
+            } else {
+                theme::dim()
+            };
             Line::from(vec![
-                Span::raw(" "),
-                Span::styled((*command).to_string(), theme::accent_bold()),
+                Span::raw(prefix),
+                Span::styled((*command).to_string(), cmd_style),
                 Span::raw("  "),
-                Span::styled((*description).to_string(), theme::dim()),
+                Span::styled((*description).to_string(), desc_style),
             ])
         })
         .collect();
-    let paragraph = Paragraph::new(lines).block(theme::panel("Commands"));
+    let scroll_indicator = if matches.len() > max_visible {
+        format!("Commands ({}/{})", selected + 1, matches.len())
+    } else {
+        "Commands".to_string()
+    };
+    let paragraph = Paragraph::new(lines).block(theme::panel(&scroll_indicator));
     frame.render_widget(paragraph, popup);
+}
+
+pub fn ensure_visible(selected: usize, scroll: &mut usize, _total: usize) {
+    let max_visible = 7usize;
+    if selected < *scroll {
+        *scroll = selected;
+    } else if selected >= *scroll + max_visible {
+        *scroll = selected.saturating_sub(max_visible - 1);
+    }
 }
 
 #[cfg(test)]
