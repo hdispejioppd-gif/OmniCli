@@ -248,10 +248,10 @@ impl Default for AppConfig {
         Self {
             data_dir,
             workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            max_turns: 8,
-            max_tool_output_bytes: 64 * 1024,
+            max_turns: 25,
+            max_tool_output_bytes: 128 * 1024,
             max_file_bytes: 8 * 1024 * 1024,
-            shell_timeout_seconds: 30,
+            shell_timeout_seconds: 120,
             provider: ProviderKind::Fake,
             openai: OpenAiConfig::default(),
             anthropic: AnthropicConfig::default(),

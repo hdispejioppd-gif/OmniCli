@@ -25,6 +25,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
 directories = "6"
 dunce = "1"
+dotenvy = "0.15"
 crossterm = { version = "0.29", features = ["event-stream"] }
 eventsource-stream = "0.2"
 futures-util = "0.3"

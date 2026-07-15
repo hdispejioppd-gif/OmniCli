@@ -23,6 +23,18 @@ use crate::{
     protocol::{ToolOutput, ToolSpec},
 };
 
+/// Normalize io::Error messages to English regardless of OS locale.
+fn io_error_message(error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => "file not found".into(),
+        std::io::ErrorKind::PermissionDenied => "permission denied".into(),
+        std::io::ErrorKind::AlreadyExists => "file already exists".into(),
+        std::io::ErrorKind::TimedOut => "operation timed out".into(),
+        std::io::ErrorKind::Interrupted => "operation interrupted".into(),
+        _ => error.to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolContext {
     pub workspace: PathBuf,
@@ -1578,15 +1590,19 @@ fn existing_directory(workspace: &Path, relative: &Path) -> Result<PathBuf, Tool
 
 fn existing_regular_file(workspace: &Path, relative: &Path) -> Result<PathBuf, ToolError> {
     validate_relative_path(relative)?;
-    let root = dunce::canonicalize(workspace)?;
+    let root = dunce::canonicalize(workspace).map_err(|e| ToolError::Path(io_error_message(&e)))?;
     let candidate = reject_link_components(&root, relative, true)?;
-    let canonical = dunce::canonicalize(&candidate)?;
+    let canonical = dunce::canonicalize(&candidate)
+        .map_err(|e| ToolError::Path(io_error_message(&e)))?;
     if !canonical.starts_with(&root) {
         return Err(ToolError::Path(
             "resolved path escapes the workspace".into(),
         ));
     }
-    if !std::fs::metadata(&canonical)?.is_file() {
+    if !std::fs::metadata(&canonical)
+        .map_err(|e| ToolError::Path(io_error_message(&e)))?
+        .is_file()
+    {
         return Err(ToolError::Path("target is not a regular file".into()));
     }
     Ok(canonical)
@@ -1778,6 +1794,8 @@ pub enum ToolError {
     Patch(String),
     #[error("git operation failed: {0}")]
     Git(String),
+    #[error("HTTP request failed: {0}")]
+    Http(String),
     #[error("process failed: {0}")]
     Process(String),
     #[error("operation exceeded limit: {0}")]
@@ -2838,13 +2856,13 @@ impl Tool for WebFetch {
         let client = reqwest::Client::builder()
             .timeout(context.shell_timeout)
             .build()
-            .map_err(|e| ToolError::Git(e.to_string()))?;
+            .map_err(|e| ToolError::Http(e.to_string()))?;
         let resp = client
             .get(&args.url)
             .header("User-Agent", "omni-cli/0.1")
             .send()
             .await
-            .map_err(|e| ToolError::Git(e.to_string()))?;
+            .map_err(|e| ToolError::Http(e.to_string()))?;
         let status = resp.status();
         if !status.is_success() {
             return Ok(ToolOutput {
@@ -2858,7 +2876,7 @@ impl Tool for WebFetch {
         let body = resp
             .text()
             .await
-            .map_err(|e| ToolError::Git(e.to_string()))?;
+            .map_err(|e| ToolError::Http(e.to_string()))?;
         let content = strip_html(&body);
         let (text, truncated) = if content.len() > max {
             (content[..max].to_string(), true)
@@ -2878,26 +2896,90 @@ impl Tool for WebFetch {
 fn strip_html(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;
-    for ch in html.chars() {
+    let mut skip_content = false;
+    let lower = html.to_ascii_lowercase();
+    let tags_to_skip = ["<script", "<style", "<noscript", "<svg", "<head"];
+    for (pos, ch) in html.char_indices() {
         match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
+            '<' => {
+                in_tag = true;
+                if skip_content {
+                    if lower[pos..].starts_with("</script>")
+                        || lower[pos..].starts_with("</style>")
+                        || lower[pos..].starts_with("</noscript>")
+                        || lower[pos..].starts_with("</svg>")
+                        || lower[pos..].starts_with("</head>")
+                    {
+                        skip_content = false;
+                    }
+                } else {
+                    for tag in tags_to_skip {
+                        if lower[pos..].starts_with(tag) {
+                            skip_content = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            '>' => {
+                in_tag = false;
+            }
+            _ if !in_tag && !skip_content => result.push(ch),
             _ => {}
         }
     }
+    let result = decode_html_entities(&result);
     result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn decode_html_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            if let Some(semi) = text[i + 1..].find(';') {
+                let entity = &text[i + 1..i + 1 + semi];
+                if let Some(decoded) = decode_entity(entity) {
+                    out.push_str(&decoded);
+                    i += 1 + semi + 1;
+                    continue;
+                }
+            }
+            out.push('&');
+            i += 1;
+        } else {
+            // Safe: we're at a char boundary since we only advance by '&' or full entity
+            let ch = text[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn decode_entity(entity: &str) -> Option<String> {
+    match entity {
+        "amp" => Some("&".into()),
+        "lt" => Some("<".into()),
+        "gt" => Some(">".into()),
+        "quot" => Some("\"".into()),
+        "apos" | "#39" => Some("'".into()),
+        "nbsp" => Some(" ".into()),
+        _ if entity.starts_with('#') => {
+            let num = entity[1..]
+                .strip_prefix('x')
+                .map(|h| u32::from_str_radix(h, 16))
+                .unwrap_or_else(|| entity[1..].parse::<u32>());
+            num.ok().and_then(char::from_u32).map(|c| c.to_string())
+        }
+        _ => None,
+    }
 }
 
 struct WebSearch;
@@ -2948,14 +3030,14 @@ impl Tool for WebSearch {
         let client = reqwest::Client::builder()
             .timeout(context.shell_timeout)
             .build()
-            .map_err(|e| ToolError::Git(e.to_string()))?;
+            .map_err(|e| ToolError::Http(e.to_string()))?;
         let resp = client
             .get("https://html.duckduckgo.com/html/")
             .query(&[("q", args.query.as_str())])
             .header("User-Agent", "omni-cli/0.1")
             .send()
             .await
-            .map_err(|e| ToolError::Git(e.to_string()))?;
+            .map_err(|e| ToolError::Http(e.to_string()))?;
         let status = resp.status();
         if !status.is_success() {
             return Ok(ToolOutput {
@@ -2969,7 +3051,7 @@ impl Tool for WebSearch {
         let body = resp
             .text()
             .await
-            .map_err(|e| ToolError::Git(e.to_string()))?;
+            .map_err(|e| ToolError::Http(e.to_string()))?;
         let results = parse_ddg_results(&body, args.max_results);
         let output = results
             .iter()
@@ -3032,13 +3114,13 @@ impl Tool for WebDownload {
         let client = reqwest::Client::builder()
             .timeout(context.shell_timeout)
             .build()
-            .map_err(|e| ToolError::Git(e.to_string()))?;
+            .map_err(|e| ToolError::Http(e.to_string()))?;
         let resp = client
             .get(&args.url)
             .header("User-Agent", "omni-cli/0.1")
             .send()
             .await
-            .map_err(|e| ToolError::Git(e.to_string()))?;
+            .map_err(|e| ToolError::Http(e.to_string()))?;
         let status = resp.status();
         if !status.is_success() {
             return Ok(ToolOutput {
@@ -3052,7 +3134,7 @@ impl Tool for WebDownload {
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| ToolError::Git(e.to_string()))?;
+            .map_err(|e| ToolError::Http(e.to_string()))?;
         if bytes.len() > context.max_file_bytes {
             return Err(ToolError::Limit(format!(
                 "download is {} bytes, limit is {}",
@@ -3971,6 +4053,22 @@ mod tests {
     fn strip_html_removes_tags_and_entities() {
         let html = "<p>Hello <b>world</b> &amp; goodbye</p>";
         assert_eq!(strip_html(html), "Hello world & goodbye");
+    }
+
+    #[test]
+    fn strip_html_skips_script_and_style() {
+        let html = "<p>visible</p><script>alert(1)</script><style>body{}</style><p>more</p>";
+        let result = strip_html(html);
+        assert!(result.contains("visible"));
+        assert!(result.contains("more"));
+        assert!(!result.contains("alert"));
+        assert!(!result.contains("body{}"));
+    }
+
+    #[test]
+    fn strip_html_decodes_numeric_entities() {
+        let html = "price &#38; quantity &#8211; details";
+        assert_eq!(strip_html(html), "price & quantity – details");
     }
 
     #[test]

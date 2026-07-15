@@ -414,6 +414,7 @@ struct App {
     exit_requested: bool,
     scroll: u16,
     follow_bottom: bool,
+    word_wrap: bool,
     permission: Option<PermissionPrompt>,
     cancellation: Option<CancellationToken>,
     tools: ToolTimeline,
@@ -472,6 +473,7 @@ impl App {
             palette_selected: 0,
             palette_scroll: 0,
             follow_bottom: true,
+            word_wrap: true,
         }
     }
 
@@ -1199,6 +1201,14 @@ fn handle_key(
         KeyCode::Enter if !app.running && key.modifiers.contains(KeyModifiers::ALT) => {
             app.editor.insert("\n");
         }
+        KeyCode::Enter if !app.running && app.palette_visible() => {
+            let matches = crate::tui_palette::filter_commands(&app.editor.text);
+            if let Some((command, _)) = matches.get(app.palette_selected) {
+                app.editor.text = command.to_string();
+                app.editor.cursor = app.editor.text.len();
+            }
+            app.palette_selected = 0;
+        }
         KeyCode::Enter if !app.running => {
             start_run(app, agent, workflows, supervisors, provider_factory, sender)
         }
@@ -1267,6 +1277,9 @@ fn handle_key(
         }
         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.editor.text.truncate(app.editor.cursor);
+        }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.word_wrap = !app.word_wrap;
         }
         KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.editor.insert(&character.to_string());
@@ -2110,13 +2123,13 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     } else {
         app.scroll.min(max_scroll)
     };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(theme::panel("Conversation"))
-            .wrap(Wrap { trim: false })
-            .scroll((effective_scroll, 0)),
-        conversation_area,
-    );
+    let mut paragraph = Paragraph::new(Text::from(lines))
+        .block(theme::panel("Conversation"))
+        .scroll((effective_scroll, 0));
+    if app.word_wrap {
+        paragraph = paragraph.wrap(Wrap { trim: false });
+    }
+    frame.render_widget(paragraph, conversation_area);
     if max_scroll > 0 {
         let mut scrollbar_state =
             ScrollbarState::new(max_scroll as usize).position(effective_scroll as usize);

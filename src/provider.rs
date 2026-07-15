@@ -183,14 +183,20 @@ impl ProviderFactory {
                 if model.trim().is_empty() {
                     return Err(ProviderError::InvalidModel);
                 }
-                let api_key = if api_key_env.trim().is_empty() {
-                    String::new()
+                if api_key_env.trim().is_empty() {
+                    // Keyless: use static construction
+                    Ok(Arc::new(OpenAiProvider::new(
+                        base_url, model, *timeout, "",
+                    )?))
                 } else {
-                    std::env::var(api_key_env).map_err(|_| ProviderError::MissingApiKey)?
-                };
-                Ok(Arc::new(OpenAiProvider::new(
-                    base_url, model, *timeout, &api_key,
-                )?))
+                    // Key re-fetched from env on each request
+                    Ok(Arc::new(OpenAiProvider::new_with_env_key(
+                        base_url,
+                        model,
+                        *timeout,
+                        api_key_env,
+                    )?))
+                }
             }
             ModelSpec::OpenAiCompatible {
                 base_url,
@@ -281,8 +287,46 @@ impl ModelProvider for FakeProvider {
                     )
                 })?;
                 tool_events(name.trim(), serde_json::from_str(arguments.trim())?)
-            } else if let Some(query) = prompt.strip_prefix("search ") {
-                tool_events("search_files", json!({ "query": query.trim() }))
+            } else if let Some(rest) = prompt.strip_prefix("download ") {
+                let (url, path) = rest.split_once(" ").ok_or_else(|| {
+                    ProviderError::InvalidPrompt("download syntax is: download <url> <path>".into())
+                })?;
+                tool_events(
+                    "web_download",
+                    json!({ "url": url.trim(), "path": path.trim() }),
+                )
+            } else if let Some(path) = prompt.strip_prefix("list ") {
+                tool_events("list_directory", json!({ "path": path.trim() }))
+            } else if let Some(rest) = prompt.strip_prefix("move ") {
+                let (from, to) = rest.split_once(" ").ok_or_else(|| {
+                    ProviderError::InvalidPrompt("move syntax is: move <from> <to>".into())
+                })?;
+                tool_events("move_file", json!({ "from": from.trim(), "to": to.trim() }))
+            } else if let Some(rest) = prompt.strip_prefix("copy ") {
+                let (from, to) = rest.split_once(" ").ok_or_else(|| {
+                    ProviderError::InvalidPrompt("copy syntax is: copy <from> <to>".into())
+                })?;
+                tool_events("copy_file", json!({ "from": from.trim(), "to": to.trim() }))
+            } else if let Some(path) = prompt.strip_prefix("delete ") {
+                tool_events("delete_file", json!({ "path": path.trim() }))
+            } else if let Some(path) = prompt.strip_prefix("mkdir ") {
+                tool_events("create_directory", json!({ "path": path.trim() }))
+            } else if let Some(path) = prompt.strip_prefix("rmdir ") {
+                tool_events("delete_directory", json!({ "path": path.trim() }))
+            } else if let Some(rest) = prompt.strip_prefix("replace ") {
+                let (find, replace) = rest.split_once("::").ok_or_else(|| {
+                    ProviderError::InvalidPrompt(
+                        "replace syntax is: replace <find>::<replacement>".into(),
+                    )
+                })?;
+                tool_events(
+                    "replace_in_files",
+                    json!({ "find": find.trim(), "replace": replace }),
+                )
+            } else if let Some(step) = prompt.strip_prefix("plan ") {
+                tool_events("update_plan", json!({ "steps": [step.trim()] }))
+            } else if let Some(message) = prompt.strip_prefix("commit ") {
+                tool_events("git_commit", json!({ "message": message.trim() }))
             } else if let Some(path) = prompt.strip_prefix("read ") {
                 tool_events("read_file", json!({ "path": path.trim() }))
             } else if let Some(command) = prompt.strip_prefix("shell ") {
@@ -331,6 +375,7 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     endpoint: Url,
     model: String,
+    api_key_env: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -380,6 +425,44 @@ impl OpenAiProvider {
             client,
             endpoint,
             model: model.into(),
+            api_key_env: None,
+        })
+    }
+
+    /// Create a provider that re-fetches the API key from the environment
+    /// variable on every request. This allows mid-session key rotation.
+    pub fn new_with_env_key(
+        base_url: &str,
+        model: impl Into<String>,
+        timeout: Duration,
+        api_key_env: &str,
+    ) -> Result<Self, ProviderError> {
+        let normalized_base = format!("{}/", base_url.trim_end_matches('/'));
+        let base = Url::parse(&normalized_base)
+            .map_err(|error| ProviderError::InvalidEndpoint(error.to_string()))?;
+        if !base.username().is_empty()
+            || base.password().is_some()
+            || base.query().is_some()
+            || base.fragment().is_some()
+        {
+            return Err(ProviderError::InvalidEndpoint(
+                "userinfo, query, and fragment are not allowed".into(),
+            ));
+        }
+        let endpoint = base
+            .join("chat/completions")
+            .map_err(|error| ProviderError::InvalidEndpoint(error.to_string()))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(timeout)
+            .build()?;
+        Ok(Self {
+            client,
+            endpoint,
+            model: model.into(),
+            api_key_env: Some(api_key_env.to_string()),
         })
     }
 }
@@ -396,15 +479,19 @@ impl ModelProvider for OpenAiProvider {
         cancellation: CancellationToken,
     ) -> Result<ModelStream, ProviderError> {
         let body = WireRequest::from_model_request(&self.model, request)?;
-        let send = self.client.post(self.endpoint.clone()).json(&body).send();
-        let response = tokio::select! {
-            _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
-            response = send => response?,
-        };
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(ProviderError::HttpStatus { status });
+        let mut request_builder = self.client.post(self.endpoint.clone()).json(&body);
+        if let Some(env_var) = &self.api_key_env {
+            let api_key = std::env::var(env_var).map_err(|_| ProviderError::MissingApiKey)?;
+            if !api_key.is_empty() {
+                request_builder = request_builder.header(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {api_key}"))
+                        .map_err(|_| ProviderError::InvalidApiKey)?,
+                );
+            }
         }
+        let retry = RetryConfig::default();
+        let response = send_with_retry(request_builder, &cancellation, &retry).await?;
 
         let mut source = response.bytes_stream().eventsource();
         let output = try_stream! {
@@ -718,8 +805,8 @@ pub enum ProviderError {
     InvalidApiKey,
     #[error("provider request failed: {0}")]
     Transport(#[from] reqwest::Error),
-    #[error("provider returned HTTP {status}")]
-    HttpStatus { status: StatusCode },
+    #[error("provider returned HTTP {status}: {body}")]
+    HttpStatus { status: StatusCode, body: String },
     #[error("provider stream failed: {0}")]
     Stream(String),
     #[error("invalid provider JSON: {0}")]
@@ -734,6 +821,110 @@ pub enum ProviderError {
     UnexpectedEof,
     #[error("provider request was cancelled")]
     Cancelled,
+    #[error("provider request failed after {max_retries} retries: {last_error}")]
+    RetryExhausted {
+        max_retries: u32,
+        last_error: String,
+    },
+}
+
+/// Configuration for HTTP retry behavior on transient failures.
+#[derive(Clone, Debug)]
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+        }
+    }
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
+}
+
+fn is_retryable_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect()
+}
+
+fn retry_delay(attempt: u32, config: &RetryConfig) -> Duration {
+    let base = config.initial_delay.as_millis() as u64;
+    let exp = base << attempt.min(10);
+    Duration::from_millis(exp.min(config.max_delay.as_millis() as u64))
+}
+
+/// Execute an HTTP request with retry on transient failures.
+/// Returns the successful response, or the last error if all retries are exhausted.
+async fn send_with_retry(
+    request: reqwest::RequestBuilder,
+    cancellation: &CancellationToken,
+    retry: &RetryConfig,
+) -> Result<reqwest::Response, ProviderError> {
+    let mut last_error: Option<ProviderError> = None;
+    for attempt in 0..=retry.max_retries {
+        if cancellation.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+        let req = request
+            .try_clone()
+            .expect("request must be cloneable for retry");
+        let response = tokio::select! {
+            _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
+            response = req.send() => response,
+        };
+        match response {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(resp);
+                }
+                if !is_retryable_status(status) {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(ProviderError::HttpStatus {
+                        status,
+                        body: body.chars().take(500).collect(),
+                    });
+                }
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| retry_delay(attempt, retry));
+                last_error = Some(ProviderError::HttpStatus {
+                    status,
+                    body: format!("retrying after {retry_after:?}"),
+                });
+                tokio::select! {
+                    _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
+                    _ = tokio::time::sleep(retry_after) => {}
+                }
+            }
+            Err(error) if is_retryable_error(&error) => {
+                last_error = Some(ProviderError::Transport(error));
+                let delay = retry_delay(attempt, retry);
+                tokio::select! {
+                    _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            }
+            Err(error) => return Err(ProviderError::Transport(error)),
+        }
+    }
+    Err(ProviderError::RetryExhausted {
+        max_retries: retry.max_retries,
+        last_error: last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".into()),
+    })
 }
 
 pub struct AnthropicProvider {
@@ -809,20 +1000,13 @@ impl ModelProvider for AnthropicProvider {
         cancellation: CancellationToken,
     ) -> Result<ModelStream, ProviderError> {
         let body = AnthropicRequest::from_model_request(&self.model, request)?;
-        let send = self
+        let request_builder = self
             .client
             .post(self.endpoint.clone())
             .header("anthropic-version", self.api_version.clone())
-            .json(&body)
-            .send();
-        let response = tokio::select! {
-            _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
-            response = send => response?,
-        };
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(ProviderError::HttpStatus { status });
-        }
+            .json(&body);
+        let retry = RetryConfig::default();
+        let response = send_with_retry(request_builder, &cancellation, &retry).await?;
 
         let mut source = response.bytes_stream().eventsource();
         let output = try_stream! {
@@ -1204,15 +1388,9 @@ impl ModelProvider for OllamaProvider {
         cancellation: CancellationToken,
     ) -> Result<ModelStream, ProviderError> {
         let body = OllamaRequest::from_model_request(&self.model, request)?;
-        let send = self.client.post(self.endpoint.clone()).json(&body).send();
-        let response = tokio::select! {
-            _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
-            response = send => response?,
-        };
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(ProviderError::HttpStatus { status });
-        }
+        let request_builder = self.client.post(self.endpoint.clone()).json(&body);
+        let retry = RetryConfig::default();
+        let response = send_with_retry(request_builder, &cancellation, &retry).await?;
 
         let output = try_stream! {
             let mut stream = response.bytes_stream();
@@ -1395,15 +1573,9 @@ impl ModelProvider for LlamaCppProvider {
             stop: vec!["<|im_end|>", "<|im_start|>"],
             grammar,
         };
-        let send = self.client.post(self.endpoint.clone()).json(&body).send();
-        let response = tokio::select! {
-            _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
-            response = send => response?,
-        };
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(ProviderError::HttpStatus { status });
-        }
+        let request_builder = self.client.post(self.endpoint.clone()).json(&body);
+        let retry = RetryConfig::default();
+        let response = send_with_retry(request_builder, &cancellation, &retry).await?;
 
         let output = try_stream! {
             let mut stream = response.bytes_stream().eventsource();
@@ -1692,7 +1864,6 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("401"));
         assert!(!rendered.contains("super-secret"));
-        assert!(!rendered.contains("invalid credentials"));
     }
 
     #[tokio::test]
@@ -1917,10 +2088,9 @@ mod tests {
             timeout: Duration::from_secs(5),
             api_key_env: "OMNI_TEST_KEY_THAT_DOES_NOT_EXIST".into(),
         };
-        assert!(matches!(
-            factory.build(&custom_with_missing_key),
-            Err(ProviderError::MissingApiKey)
-        ));
+        // Custom providers with api_key_env defer key checking to call time,
+        // so build() succeeds even if the env var is not set yet.
+        assert!(factory.build(&custom_with_missing_key).is_ok());
         let anthropic = ModelSpec::Anthropic {
             base_url: "https://example.invalid/v1/".into(),
             model: "model".into(),

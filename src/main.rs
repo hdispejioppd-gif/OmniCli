@@ -183,9 +183,23 @@ enum Command {
         command: PluginCommand,
     },
     Completions {
-        shell: String,
+        shell: Option<String>,
+    },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     Doctor,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Print the effective merged configuration.
+    Show,
+    /// Print the path to the global config file.
+    Path,
+    /// Open the global config file in your editor.
+    Edit,
 }
 
 #[derive(Debug, Subcommand)]
@@ -371,6 +385,7 @@ fn canonicalize_boundary(path: &Path) -> PathBuf {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = dotenvy::dotenv();
     let cli = Cli::parse();
     let mut config = AppConfig::load(cli.config)?;
     if let Some(data_dir) = cli.data_dir {
@@ -1056,11 +1071,57 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Completions { shell } => {
-            let shell = Shell::from_str(&shell, true)
+            let shell_name = shell.unwrap_or_else(|| {
+                if cfg!(windows) {
+                    "powershell".to_string()
+                } else {
+                    std::env::var("SHELL")
+                        .map(|s| {
+                            std::path::Path::new(&s)
+                                .file_name()
+                                .map(|f| f.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "bash".to_string())
+                        })
+                        .unwrap_or_else(|_| "bash".to_string())
+                }
+            });
+            let shell = Shell::from_str(&shell_name, true)
                 .map_err(|error| format!("unsupported shell: {error}"))?;
             let mut command = Cli::command();
             generate(shell, &mut command, "omni", &mut io::stdout());
         }
+        Command::Config { command } => match command {
+            ConfigCommand::Show => {
+                let toml = toml::to_string_pretty(&config)?;
+                if cli.json {
+                    println!("{}", serde_json::json!({"config": toml}));
+                } else {
+                    println!("{toml}");
+                }
+            }
+            ConfigCommand::Path => {
+                let path = config.data_dir.join("omni.toml");
+                println!("{}", path.display());
+            }
+            ConfigCommand::Edit => {
+                let path = config.data_dir.join("omni.toml");
+                if !path.exists() {
+                    fs::create_dir_all(&config.data_dir)?;
+                    fs::write(&path, "# omni.toml — global config\n")?;
+                }
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                    if cfg!(windows) {
+                        "notepad".into()
+                    } else {
+                        "vi".into()
+                    }
+                });
+                let status = std::process::Command::new(&editor).arg(&path).status()?;
+                if !status.success() {
+                    return Err(format!("editor {editor} exited with {status}").into());
+                }
+            }
+        },
         Command::Plugins { command } => match command {
             PluginCommand::List => {
                 let registry = PluginRegistry::load_from_config(&config.plugins).await?;
@@ -1223,7 +1284,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "profile": active_profile,
                 "database": config.database_path(),
                 "workspace": config.workspace,
-                "tools": ["apply_patch", "create_file", "git_diff", "git_status", "git_worktree_create", "git_worktree_inspect", "git_worktree_list", "git_worktree_remove", "read_file", "run_checks", "search_files", "shell"],
+                "tools": configured_tools(&config).specs().iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
                 "custom_providers": config.custom_providers.iter().map(|(name, custom)| serde_json::json!({
                     "name": name.clone(),
                     "model": custom.model.clone(),
@@ -1250,12 +1311,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             allow_mcp_call,
             allow_plugins,
         } => {
-            let allow_write = allow_write || full_access;
-            let allow_shell = allow_shell || full_access;
-            let allow_worktree = allow_worktree || full_access;
-            let allow_mcp_start = allow_mcp_start || full_access;
-            let allow_mcp_call = allow_mcp_call || full_access;
-            let allow_plugins = allow_plugins || full_access;
+            let opts = RunOptions::from_flags(
+                full_access,
+                allow_write,
+                allow_shell,
+                verify,
+                allow_worktree,
+                allow_mcp_start,
+                allow_mcp_call,
+                allow_plugins,
+            );
             execute_run(
                 &config,
                 cli.json,
@@ -1265,13 +1330,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     verify,
                     system_prompt: Some(omnicli::DEFAULT_AGENT_SYSTEM_PROMPT.to_string()),
                 },
-                allow_write,
-                allow_shell,
-                verify,
-                allow_worktree,
-                allow_mcp_start,
-                allow_mcp_call,
-                allow_plugins,
+                opts,
             )
             .await?;
         }
@@ -1318,6 +1377,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let prompt = format!(
                 "Make this project's checks pass. First run run_checks to see the current state, then read the structured failures[] array and repair each problem at its file:line with the smallest safe change. Re-run checks after each round of edits and keep going until every check passes or you are genuinely blocked (explain clearly if so).{focus_args}{extra}"
             );
+            let opts = RunOptions::from_flags(
+                full_access,
+                true,
+                allow_shell,
+                true,
+                allow_worktree,
+                allow_mcp_start,
+                allow_mcp_call,
+                allow_plugins,
+            );
             execute_run(
                 &config,
                 cli.json,
@@ -1327,13 +1396,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     verify: true,
                     system_prompt: Some(omnicli::DEFAULT_AGENT_SYSTEM_PROMPT.to_string()),
                 },
-                true,
-                allow_shell,
-                true,
-                allow_worktree,
-                allow_mcp_start,
-                allow_mcp_call,
-                allow_plugins,
+                opts,
             )
             .await?;
         }
@@ -1350,13 +1413,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             .into(),
                     ),
                 },
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
+                RunOptions::read_only(),
             )
             .await?;
         }
@@ -1372,13 +1429,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "You are an architect. Create a detailed plan. Do not write code.".into(),
                     ),
                 },
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
+                RunOptions::read_only(),
             )
             .await?;
         }
@@ -1395,13 +1446,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             .into(),
                     ),
                 },
-                false,
-                false,
-                verify,
-                false,
-                false,
-                false,
-                false,
+                RunOptions {
+                    verify,
+                    ..RunOptions::read_only()
+                },
             )
             .await?;
         }
@@ -1457,11 +1505,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn execute_run(
-    config: &AppConfig,
-    json: bool,
-    request: RunRequest,
+#[derive(Clone, Copy)]
+struct RunOptions {
     allow_write: bool,
     allow_shell: bool,
     verify: bool,
@@ -1469,7 +1514,54 @@ async fn execute_run(
     allow_mcp_start: bool,
     allow_mcp_call: bool,
     allow_plugins: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+}
+
+impl RunOptions {
+    fn read_only() -> Self {
+        Self {
+            allow_write: false,
+            allow_shell: false,
+            verify: false,
+            allow_worktree: false,
+            allow_mcp_start: false,
+            allow_mcp_call: false,
+            allow_plugins: false,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_flags(
+        full_access: bool,
+        allow_write: bool,
+        allow_shell: bool,
+        verify: bool,
+        allow_worktree: bool,
+        allow_mcp_start: bool,
+        allow_mcp_call: bool,
+        allow_plugins: bool,
+    ) -> Self {
+        Self {
+            allow_write: allow_write || full_access,
+            allow_shell: allow_shell || full_access,
+            verify,
+            allow_worktree: allow_worktree || full_access,
+            allow_mcp_start: allow_mcp_start || full_access,
+            allow_mcp_call: allow_mcp_call || full_access,
+            allow_plugins: allow_plugins || full_access,
+        }
+    }
+
+    fn to_policy(self, workspace: PathBuf) -> Policy {
+        Policy::new(workspace, self.allow_write, self.allow_shell, self.verify)
+            .with_mcp(self.allow_mcp_start, self.allow_mcp_call)
+            .with_worktrees(self.allow_worktree)
+            .with_plugins(self.allow_plugins)
+    }
+}
+
+fn build_provider(
+    config: &AppConfig,
+) -> Result<Arc<dyn ModelProvider>, Box<dyn std::error::Error>> {
     let provider: Arc<dyn ModelProvider> = match config.provider {
         ProviderKind::Fake => Arc::new(FakeProvider),
         ProviderKind::OpenAi => Arc::new(OpenAiProvider::from_env(
@@ -1516,13 +1608,20 @@ async fn execute_run(
             )?)
         }
     };
+    Ok(provider)
+}
 
-    let policy = Policy::new(config.workspace.clone(), allow_write, allow_shell, verify)
-        .with_mcp(allow_mcp_start, allow_mcp_call)
-        .with_worktrees(allow_worktree)
-        .with_plugins(allow_plugins);
-    let (mut tools, plugins) = configured_tools_with_plugins(config, allow_plugins).await?;
-    if allow_mcp_start {
+async fn execute_run(
+    config: &AppConfig,
+    json: bool,
+    request: RunRequest,
+    opts: RunOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = build_provider(config)?;
+
+    let policy = opts.to_policy(config.workspace.clone());
+    let (mut tools, plugins) = configured_tools_with_plugins(config, opts.allow_plugins).await?;
+    if opts.allow_mcp_start {
         register_configured_tools(
             &mut tools,
             &config.mcp,
