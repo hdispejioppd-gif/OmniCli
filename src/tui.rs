@@ -564,6 +564,7 @@ impl App {
         self.running = false;
         self.active_kind = None;
         self.cancellation = None;
+        self.scroll = u16::MAX;
         match result {
             Ok(outcome) => {
                 self.session_id = Some(outcome.session_id);
@@ -1333,6 +1334,7 @@ fn start_run(
         app.history.push(prompt.clone());
     }
     app.history_index = None;
+    app.scroll = u16::MAX;
     match parse_tui_command(prompt) {
         TuiCommand::Workflows => {
             let mut dashboard = WorkflowDashboard {
@@ -1586,6 +1588,7 @@ fn start_agent_run(
     app.active_kind = Some(ActiveKind::Agent);
     app.status = "running".into();
     app.last_prompt = Some(prompt.clone());
+    app.scroll = u16::MAX;
     let request = RunRequest {
         prompt,
         session_id: app.session_id.clone(),
