@@ -1,5 +1,7 @@
 # ◆ OmniCLI
 
+[![CI](https://github.com/hdispejioppd-gif/OmniCli/actions/workflows/ci.yml/badge.svg)](https://github.com/hdispejioppd-gif/OmniCli/actions/workflows/ci.yml) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE) [![Rust 1.94](https://img.shields.io/badge/rust-1.94%20%C2%B7%20edition%202024-orange.svg)](rust-toolchain.toml)
+
 **Open-source, provider-neutral agentic CLI runtime** — chat, typed tools, DAG workflows, parallel agents, and managed Git worktrees, all in a fast terminal UI.
 
 `Rust 1.94 · edition 2024 · Apache-2.0 · ratatui TUI · SQLite-backed`
@@ -8,13 +10,27 @@
 
 ## Why omni
 
-- **Provider-neutral by design.** One runtime, many models: `fake` (deterministic, offline), OpenAI, Anthropic, Ollama — plus LM Studio, llama.cpp, and generic OpenAI-compatible endpoints. Switch models mid-session without losing state.
+| | omni | pi & other AI CLIs |
+| --- | --- | --- |
+| Framed, line-numbered, syntax-highlighted code in the transcript | ✅ | rare |
+| Live `/` command palette + `F1` key overlay | ✅ | rare |
+| Unlimited named OpenAI-compatible providers in TOML | ✅ | varies |
+| Full-access mode with a visible badge and audit trail | ✅ | often silent |
+| Workflow DAGs, supervisors, plugins, MCP — journaled in SQLite | ✅ | varies |
+
+- **Provider-neutral by design.** One runtime, many models: `fake` (deterministic, offline), OpenAI, Anthropic, Ollama — plus LM Studio, llama.cpp, and unlimited named OpenAI-compatible endpoints (OpenRouter, DeepSeek, Groq, vLLM, …) via `[custom_providers.*]`. Switch models mid-session without losing state.
 - **Beautiful, fast TUI.** A cohesive dark truecolor theme, rounded panels, animated status spinner, speaker-labelled transcript, syntax-highlighted markdown and code, live workflow DAG dashboard — redrawn at 30 fps.
 - **Security first, not bolted on.** Every capability (write, shell, MCP, plugins, worktrees) is denied by default and granted per run or per call. Path escapes are hard denials that never reach a prompt.
 - **Everything is journaled.** Sessions, messages, workflow runs, and events live in SQLite with a versioned NDJSON event stream — resumable, inspectable, machine-readable with `--json`.
 - **Parallel by default.** Independent workflow steps run concurrently; the supervisor fans out whole agents across isolated Git worktrees.
 
 ## Quick start
+
+```text
+omni           # just `omni` — opens the interactive TUI
+omni init      # write a starter omni.toml into the workspace
+omni doctor    # inspect provider, API keys, database, and plugins
+```
 
 ```powershell
 cargo build
@@ -70,6 +86,11 @@ The TUI streams model output, preserves and continues SQLite sessions, shows liv
 | `Ctrl+N` | New session |
 | `Ctrl+W` | Workflow dashboard |
 | `Ctrl+T` | Supervisor dashboard |
+| `↑` / `↓` | Prompt history |
+| `F1` | Keyboard help overlay |
+| `Ctrl+A` / `Ctrl+E` | Jump to line start / end |
+| `Ctrl+U` | Clear the prompt |
+| `Ctrl+K` | Delete to end of line |
 | `PageUp` / `PageDown` | Scroll the transcript |
 | `End` | Follow the latest output |
 
@@ -84,7 +105,12 @@ The TUI streams model output, preserves and continues SQLite sessions, shows liv
 /models
 /model fake
 /model openai/gpt-4.1-mini
+/help
+/export
+/clear
 ```
+
+Type `/` in the prompt to see the live command palette; `/export` writes the current transcript to `omni-session-<id>.md` in the working directory.
 
 The workflow dashboard polls the SQLite journal while a local workflow is active and shows step status, tool, attempts, and dependency edges. `Tab` or `Right` focuses steps; the selected step displays declared/captured artifacts, complete SHA-256 values, errors, and bounded stdout/stderr. Use `r` to resume the selected run, `n` to prepare a new workflow path, `c` to cancel the workflow owned by this TUI, and `Ctrl+R` to refresh persisted state.
 
@@ -137,6 +163,8 @@ cargo run -- --profile ci --json run "status"
 CLI flags override path settings.
 
 ## Permissions & safety model
+
+> **Full access mode.** `omni tui --full-access` / `omni run --full-access` (alias `--yolo`) grants every capability (write, shell, MCP, plugins, worktrees) for the session and auto-approves all remaining permission prompts. The header shows a `FULL ACCESS` badge and every auto-approval is logged to the transcript. Use it only in workspaces you fully trust.
 
 Writes and shell execution are denied unless explicitly enabled for the run:
 

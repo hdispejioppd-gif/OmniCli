@@ -42,6 +42,13 @@ pub enum ModelSpec {
         model: String,
         timeout: Duration,
     },
+    Custom {
+        name: String,
+        base_url: String,
+        model: String,
+        timeout: Duration,
+        api_key_env: String,
+    },
     Anthropic {
         base_url: String,
         model: String,
@@ -73,6 +80,7 @@ impl ModelSpec {
             Self::Fake => "fake".into(),
             Self::OpenAi { model, .. } => format!("openai/{model}"),
             Self::OpenAiCompatible { model, .. } => format!("openai-compatible/{model}"),
+            Self::Custom { name, model, .. } => format!("{name}/{model}"),
             Self::Anthropic { model, .. } => format!("anthropic/{model}"),
             Self::Ollama { model, .. } => format!("ollama/{model}"),
             Self::LmStudio { model, .. } => format!("lm-studio/{model}"),
@@ -163,6 +171,25 @@ impl ProviderFactory {
                     .ok_or(ProviderError::MissingApiKey)?;
                 Ok(Arc::new(OpenAiProvider::new(
                     base_url, model, *timeout, api_key,
+                )?))
+            }
+            ModelSpec::Custom {
+                base_url,
+                model,
+                timeout,
+                api_key_env,
+                ..
+            } => {
+                if model.trim().is_empty() {
+                    return Err(ProviderError::InvalidModel);
+                }
+                let api_key = if api_key_env.trim().is_empty() {
+                    String::new()
+                } else {
+                    std::env::var(api_key_env).map_err(|_| ProviderError::MissingApiKey)?
+                };
+                Ok(Arc::new(OpenAiProvider::new(
+                    base_url, model, *timeout, &api_key,
                 )?))
             }
             ModelSpec::OpenAiCompatible {
@@ -1866,6 +1893,26 @@ mod tests {
         };
         assert!(matches!(
             factory.build(&openai_compatible),
+            Err(ProviderError::MissingApiKey)
+        ));
+        let custom_keyless = ModelSpec::Custom {
+            name: "vllm".into(),
+            base_url: "http://localhost:8000/v1/".into(),
+            model: "local".into(),
+            timeout: Duration::from_secs(5),
+            api_key_env: String::new(),
+        };
+        assert_eq!(custom_keyless.selector(), "vllm/local");
+        assert!(factory.build(&custom_keyless).is_ok());
+        let custom_with_missing_key = ModelSpec::Custom {
+            name: "openrouter".into(),
+            base_url: "https://example.invalid/v1/".into(),
+            model: "model".into(),
+            timeout: Duration::from_secs(5),
+            api_key_env: "OMNI_TEST_KEY_THAT_DOES_NOT_EXIST".into(),
+        };
+        assert!(matches!(
+            factory.build(&custom_with_missing_key),
             Err(ProviderError::MissingApiKey)
         ));
         let anthropic = ModelSpec::Anthropic {

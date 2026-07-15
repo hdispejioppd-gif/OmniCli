@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub lm_studio: LmStudioConfig,
     pub llama_cpp: LlamaCppConfig,
     pub openai_compatible: OpenAiCompatibleConfig,
+    pub custom_providers: BTreeMap<String, CustomProviderConfig>,
     pub mcp: McpConfig,
     pub plugins: BTreeMap<String, PluginConfig>,
     pub profiles: BTreeMap<String, ProfileConfig>,
@@ -37,6 +38,7 @@ pub struct ProfileConfig {
     pub lm_studio: Option<LmStudioConfig>,
     pub llama_cpp: Option<LlamaCppConfig>,
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
+    pub custom_providers: Option<BTreeMap<String, CustomProviderConfig>>,
     pub max_turns: Option<u32>,
     pub max_tool_output_bytes: Option<usize>,
     pub max_file_bytes: Option<usize>,
@@ -216,6 +218,28 @@ impl Default for OpenAiCompatibleConfig {
     }
 }
 
+/// A named OpenAI-compatible endpoint (OpenRouter, DeepSeek, Groq, Together,
+/// vLLM -- any server that speaks `/chat/completions`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CustomProviderConfig {
+    pub base_url: String,
+    pub model: String,
+    pub timeout_seconds: u64,
+    pub api_key_env: String,
+}
+
+impl Default for CustomProviderConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            model: String::new(),
+            timeout_seconds: 120,
+            api_key_env: String::new(),
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         let data_dir = ProjectDirs::from("dev", "omnicli", "omni")
@@ -235,6 +259,7 @@ impl Default for AppConfig {
             lm_studio: LmStudioConfig::default(),
             llama_cpp: LlamaCppConfig::default(),
             openai_compatible: OpenAiCompatibleConfig::default(),
+            custom_providers: BTreeMap::new(),
             mcp: McpConfig::default(),
             plugins: BTreeMap::new(),
             profiles: BTreeMap::new(),
@@ -245,24 +270,102 @@ impl Default for AppConfig {
 impl AppConfig {
     pub fn load(explicit: Option<PathBuf>) -> Result<Self, ConfigError> {
         let mut config = Self::default();
-        let path = explicit.or_else(|| {
-            let candidate = config.workspace.join("omni.toml");
-            candidate.exists().then_some(candidate)
-        });
 
-        if let Some(path) = path {
-            let raw = fs::read_to_string(&path).map_err(|source| ConfigError::Read {
-                path: path.clone(),
+        // 1. Global config: data_dir/omni.toml (persists across all projects)
+        let global_path = config.data_dir.join("omni.toml");
+        if global_path.exists() {
+            let raw = fs::read_to_string(&global_path).map_err(|source| ConfigError::Read {
+                path: global_path.clone(),
                 source,
             })?;
             config = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
-                path: path.clone(),
+                path: global_path.clone(),
                 source,
             })?;
         }
 
+        // 2. Local project config: workspace/omni.toml (overrides global)
+        let local_path = config.workspace.join("omni.toml");
+        if local_path.exists() {
+            let raw = fs::read_to_string(&local_path).map_err(|source| ConfigError::Read {
+                path: local_path.clone(),
+                source,
+            })?;
+            let local: AppConfig = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+                path: local_path.clone(),
+                source,
+            })?;
+            config.merge(local);
+        }
+
+        // 3. Explicit --config path (highest priority)
+        if let Some(path) = explicit {
+            let raw = fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            let explicit_cfg: AppConfig =
+                toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+                    path: path.clone(),
+                    source,
+                })?;
+            config.merge(explicit_cfg);
+        }
+
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn merge(&mut self, other: AppConfig) {
+        if other.max_turns != Self::default().max_turns {
+            self.max_turns = other.max_turns;
+        }
+        if other.max_tool_output_bytes != Self::default().max_tool_output_bytes {
+            self.max_tool_output_bytes = other.max_tool_output_bytes;
+        }
+        if other.max_file_bytes != Self::default().max_file_bytes {
+            self.max_file_bytes = other.max_file_bytes;
+        }
+        if other.shell_timeout_seconds != Self::default().shell_timeout_seconds {
+            self.shell_timeout_seconds = other.shell_timeout_seconds;
+        }
+        if other.provider != ProviderKind::Fake {
+            self.provider = other.provider;
+        }
+        if !other.openai.model.is_empty() || !other.openai.base_url.is_empty() {
+            self.openai = other.openai;
+        }
+        if !other.anthropic.model.is_empty() || !other.anthropic.base_url.is_empty() {
+            self.anthropic = other.anthropic;
+        }
+        if !other.ollama.model.is_empty() || !other.ollama.base_url.is_empty() {
+            self.ollama = other.ollama;
+        }
+        if !other.lm_studio.model.is_empty() || !other.lm_studio.base_url.is_empty() {
+            self.lm_studio = other.lm_studio;
+        }
+        if !other.llama_cpp.model.is_empty() || !other.llama_cpp.base_url.is_empty() {
+            self.llama_cpp = other.llama_cpp;
+        }
+        if !other.openai_compatible.model.is_empty() || !other.openai_compatible.base_url.is_empty()
+        {
+            self.openai_compatible = other.openai_compatible;
+        }
+        for (name, provider) in other.custom_providers {
+            self.custom_providers.insert(name, provider);
+        }
+        if other.shell_timeout_seconds != Self::default().shell_timeout_seconds {
+            self.shell_timeout_seconds = other.shell_timeout_seconds;
+        }
+        if !other.mcp.servers.is_empty() {
+            self.mcp = other.mcp;
+        }
+        for (name, plugin) in other.plugins {
+            self.plugins.insert(name, plugin);
+        }
+        for (name, profile) in other.profiles {
+            self.profiles.insert(name, profile);
+        }
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -365,6 +468,28 @@ impl AppConfig {
                 "openai_compatible.api_key_env must not be empty".into(),
             ));
         }
+        for (name, custom) in &self.custom_providers {
+            if name.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "custom_providers keys must not be empty".into(),
+                ));
+            }
+            if custom.base_url.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "custom_providers.{name}.base_url must not be empty"
+                )));
+            }
+            if custom.model.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "custom_providers.{name}.model must not be empty"
+                )));
+            }
+            if custom.timeout_seconds == 0 {
+                return Err(ConfigError::Invalid(format!(
+                    "custom_providers.{name}.timeout_seconds must be greater than zero"
+                )));
+            }
+        }
         if self.mcp.max_message_bytes == 0 {
             return Err(ConfigError::Invalid(
                 "mcp.max_message_bytes must be greater than zero".into(),
@@ -457,6 +582,7 @@ impl AppConfig {
             && profile.lm_studio.is_none()
             && profile.llama_cpp.is_none()
             && profile.openai_compatible.is_none()
+            && profile.custom_providers.is_none()
             && profile.max_turns.is_none()
             && profile.max_tool_output_bytes.is_none()
             && profile.max_file_bytes.is_none()
@@ -485,6 +611,9 @@ impl AppConfig {
         if let Some(openai_compatible) = profile.openai_compatible {
             self.openai_compatible = openai_compatible;
         }
+        if let Some(custom_providers) = profile.custom_providers {
+            self.custom_providers = custom_providers;
+        }
         if let Some(max_turns) = profile.max_turns {
             self.max_turns = max_turns;
         }
@@ -511,6 +640,7 @@ fn builtin_profile(name: &str) -> Option<ProfileConfig> {
             lm_studio: None,
             llama_cpp: None,
             openai_compatible: None,
+            custom_providers: None,
             max_turns: Some(4),
             max_tool_output_bytes: Some(16 * 1024),
             max_file_bytes: Some(1024 * 1024),
@@ -524,6 +654,7 @@ fn builtin_profile(name: &str) -> Option<ProfileConfig> {
             lm_studio: None,
             llama_cpp: None,
             openai_compatible: None,
+            custom_providers: None,
             max_turns: Some(2),
             max_tool_output_bytes: Some(8 * 1024),
             max_file_bytes: Some(512 * 1024),
@@ -537,6 +668,7 @@ fn builtin_profile(name: &str) -> Option<ProfileConfig> {
             lm_studio: None,
             llama_cpp: None,
             openai_compatible: None,
+            custom_providers: None,
             max_turns: Some(4),
             max_tool_output_bytes: Some(16 * 1024),
             max_file_bytes: Some(1024 * 1024),
@@ -550,6 +682,7 @@ fn builtin_profile(name: &str) -> Option<ProfileConfig> {
             lm_studio: None,
             llama_cpp: None,
             openai_compatible: None,
+            custom_providers: None,
             max_turns: Some(3),
             max_tool_output_bytes: Some(16 * 1024),
             max_file_bytes: Some(1024 * 1024),
@@ -580,6 +713,9 @@ fn merge_profile(base: &mut ProfileConfig, override_: &ProfileConfig) {
     }
     if override_.openai_compatible.is_some() {
         base.openai_compatible = override_.openai_compatible.clone();
+    }
+    if override_.custom_providers.is_some() {
+        base.custom_providers = override_.custom_providers.clone();
     }
     if override_.max_turns.is_some() {
         base.max_turns = override_.max_turns;
@@ -612,6 +748,38 @@ fn valid_environment_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_providers_parse_and_validate() {
+        use super::*;
+        let config: AppConfig = toml::from_str(
+            r#"
+[custom_providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-sonnet-4"
+api_key_env = "OPENROUTER_API_KEY"
+
+[custom_providers.vllm]
+base_url = "http://localhost:8000/v1"
+model = "local"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.custom_providers.len(), 2);
+        let vllm = &config.custom_providers["vllm"];
+        assert_eq!(vllm.timeout_seconds, 120);
+        assert!(vllm.api_key_env.is_empty());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn custom_provider_missing_model_fails_validation() {
+        use super::*;
+        let config: AppConfig =
+            toml::from_str("[custom_providers.broken]\nbase_url = \"http://localhost:8000/v1\"\n")
+                .unwrap();
+        assert!(config.validate().is_err());
+    }
+
     use super::*;
 
     #[test]

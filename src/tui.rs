@@ -51,6 +51,7 @@ use crate::{
 pub struct TuiOptions {
     pub session_id: Option<String>,
     pub verify: bool,
+    pub full_access: bool,
     pub initial_model: ModelSpec,
     pub available_models: Vec<ModelSpec>,
 }
@@ -423,6 +424,8 @@ struct App {
     run_started: Option<std::time::Instant>,
     history: Vec<String>,
     history_index: Option<usize>,
+    show_help: bool,
+    full_access: bool,
 }
 
 impl App {
@@ -452,6 +455,8 @@ impl App {
             run_started: None,
             history: Vec::new(),
             history_index: None,
+            show_help: false,
+            full_access: options.full_access,
         }
     }
 
@@ -472,6 +477,9 @@ impl App {
             }
             RunEventKind::ToolCallRequested { call } => {
                 self.flush_streaming();
+                let name = sanitize(&call.name, 64);
+                self.transcript.push(format!("TOOL {name}"));
+                self.status = format!("⚙ {name}");
                 self.tools.requested(
                     call.id,
                     call.name,
@@ -490,6 +498,9 @@ impl App {
             }
             RunEventKind::ToolFinished { call_id, output } => {
                 self.tools.finished(call_id, output);
+                if self.running {
+                    self.status = "running".into();
+                }
             }
             RunEventKind::AssistantMessage { .. } => self.flush_streaming(),
             RunEventKind::Usage { usage } => {
@@ -525,6 +536,11 @@ impl App {
         match result {
             Ok(outcome) => {
                 self.session_id = Some(outcome.session_id);
+                if let Some(started) = self.run_started.take() {
+                    let secs = started.elapsed().as_secs();
+                    self.transcript
+                        .push(format!("✓ done in {:02}:{:02}", secs / 60, secs % 60));
+                }
                 self.status = "idle".into();
             }
             Err(error) => {
@@ -750,6 +766,10 @@ async fn event_loop(
     options: TuiOptions,
 ) -> Result<(), TuiError> {
     let mut app = App::new(options);
+    if app.full_access {
+        app.transcript
+            .push("⚠ full access — all permissions are granted and auto-approved.".into());
+    }
     if let Some(session_id) = app.session_id.clone() {
         match store.load_session(&session_id) {
             Ok(Some(session)) => app.load_session(session),
@@ -821,9 +841,18 @@ async fn event_loop(
                 }
                 prompt = permission_receiver.recv(), if app.permission.is_none() => {
                     if let Some(prompt) = prompt {
-                        app.status = "permission".into();
-                        app.tools.set_status(&prompt.request.call_id, ToolStatus::Awaiting);
-                        app.permission = Some(prompt);
+                        if app.full_access {
+                            app.transcript.push(format!(
+                                "⚠ auto-approved: {} — {}",
+                                prompt.request.tool,
+                                sanitize(&prompt.reason, 256)
+                            ));
+                            let _ = prompt.reply.send(true);
+                        } else {
+                            app.status = "permission".into();
+                            app.tools.set_status(&prompt.request.call_id, ToolStatus::Awaiting);
+                            app.permission = Some(prompt);
+                        }
                     }
                 }
                 _ = redraw.tick() => {}
@@ -843,6 +872,14 @@ fn handle_key(
     provider_factory: &Arc<ProviderFactory>,
     sender: &mpsc::Sender<BackendEvent>,
 ) {
+    if key.code == KeyCode::F(1) {
+        app.show_help = !app.show_help;
+        return;
+    }
+    if app.show_help && key.code == KeyCode::Esc {
+        app.show_help = false;
+        return;
+    }
     if let Some(prompt) = app.permission.take() {
         match key.code {
             KeyCode::Char('y' | 'Y') => {
@@ -1163,6 +1200,18 @@ fn handle_key(
         }
         KeyCode::End if !app.running => app.editor.end(),
         KeyCode::Tab if !app.running => app.editor.insert("\t"),
+        KeyCode::Char('a') if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.editor.home();
+        }
+        KeyCode::Char('e') if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.editor.end();
+        }
+        KeyCode::Char('u') if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.editor.clear();
+        }
+        KeyCode::Char('k') if !app.running && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.editor.text.truncate(app.editor.cursor);
+        }
         KeyCode::Char(character)
             if !app.running && !key.modifiers.contains(KeyModifiers::CONTROL) =>
         {
@@ -1239,7 +1288,13 @@ fn start_run(
                 .available_models
                 .iter()
                 .find(|model| model.selector() == selector)
-                .cloned();
+                .cloned()
+                .or_else(|| {
+                    app.available_models
+                        .iter()
+                        .find(|model| model.selector().contains(selector.as_str()))
+                        .cloned()
+                });
             if let Some(model) = model {
                 switch_model(app, agent, provider_factory, model);
             } else {
@@ -1260,6 +1315,38 @@ fn start_run(
         TuiCommand::SupervisorRun(path) => {
             start_supervisor(app, supervisors, sender, path);
         }
+        TuiCommand::Help => {
+            app.show_help = true;
+        }
+        TuiCommand::Export => {
+            let name = format!(
+                "omni-session-{}.md",
+                app.session_id.as_deref().unwrap_or("new")
+            );
+            let mut body = String::from("# omni session transcript\n\n");
+            for line in &app.transcript {
+                if let Some(content) = line.strip_prefix("OMNI ") {
+                    body.push_str("**omni**\n\n");
+                    body.push_str(content);
+                } else if let Some(content) = line.strip_prefix("YOU  ") {
+                    body.push_str("**you**\n\n");
+                    body.push_str(content);
+                } else if let Some(content) = line.strip_prefix("TOOL ") {
+                    body.push_str(&format!("- ⚙ `{content}`"));
+                } else {
+                    body.push_str(line);
+                }
+                body.push_str("\n\n");
+            }
+            app.status = match std::fs::write(&name, body) {
+                Ok(()) => format!("exported to {name}"),
+                Err(error) => format!("export failed: {error}"),
+            };
+        }
+        TuiCommand::Clear => {
+            app.reset_session();
+            app.status = "new session".into();
+        }
         TuiCommand::Invalid(message) => {
             app.status = message.into();
         }
@@ -1276,6 +1363,9 @@ enum TuiCommand {
     Model(String),
     Supervisors,
     SupervisorRun(PathBuf),
+    Help,
+    Export,
+    Clear,
     Invalid(&'static str),
     Agent(String),
 }
@@ -1290,6 +1380,15 @@ fn parse_tui_command(prompt: String) -> TuiCommand {
     }
     if trimmed == "/supervisors" {
         return TuiCommand::Supervisors;
+    }
+    if matches!(trimmed, "/help" | "/keys") {
+        return TuiCommand::Help;
+    }
+    if trimmed == "/export" {
+        return TuiCommand::Export;
+    }
+    if matches!(trimmed, "/clear" | "/new") {
+        return TuiCommand::Clear;
     }
     if let Some(path) = trimmed.strip_prefix("/supervisor run ") {
         return if path.trim().is_empty() {
@@ -1676,7 +1775,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     };
     let mut header_spans = vec![
         Span::styled(
-            " omni ",
+            concat!(" omni v", env!("CARGO_PKG_VERSION"), " "),
             Style::default()
                 .fg(theme::BG)
                 .bg(theme::ACCENT)
@@ -1699,6 +1798,16 @@ fn render(frame: &mut Frame<'_>, app: &App) {
             status_style.add_modifier(Modifier::BOLD),
         ),
     ];
+    if app.full_access {
+        header_spans.push(Span::styled("  │  ", theme::dim()));
+        header_spans.push(Span::styled(
+            " FULL ACCESS ",
+            Style::default()
+                .fg(theme::BG)
+                .bg(theme::WARNING)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if app.usage.total_tokens > 0 {
         header_spans.push(Span::styled("  │  ", theme::dim()));
         header_spans.push(Span::styled(
@@ -1729,18 +1838,33 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         chunks[0],
     );
     let mut lines = Vec::new();
+    if !app.running && app.transcript.len() <= 1 {
+        lines.extend(crate::tui_banner::welcome_lines(area.width));
+    }
     for line in &app.transcript {
         if let Some(content) = line.strip_prefix("OMNI ") {
             lines.push(transcript_label("omni", theme::ACCENT));
             lines.extend(crate::tui_markdown::render_markdown(content, area.width));
             lines.push(Line::default());
         } else if let Some(content) = line.strip_prefix("YOU  ") {
+            if !lines.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  ····",
+                    Style::default().fg(theme::TEXT_DIM),
+                )));
+                lines.push(Line::default());
+            }
             lines.push(transcript_label("you", theme::ACCENT_ALT));
             lines.push(Line::from(Span::styled(
                 content.to_string(),
                 Style::default().fg(theme::TEXT),
             )));
             lines.push(Line::default());
+        } else if let Some(content) = line.strip_prefix("TOOL ") {
+            lines.push(Line::from(vec![
+                Span::styled("  ⚙ ", theme::dim()),
+                Span::styled(content.to_string(), theme::muted()),
+            ]));
         } else if let Some(content) = line.strip_prefix("✦ ") {
             lines.push(Line::default());
             lines.push(Line::from(vec![
@@ -1885,9 +2009,18 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         Paragraph::new(app.editor.display_with_cursor())
     };
     frame.render_widget(
-        prompt_paragraph
-            .wrap(Wrap { trim: false })
-            .block(theme::panel_accent("Prompt")),
+        prompt_paragraph.wrap(Wrap { trim: false }).block({
+            let title = if app.editor.text.is_empty() {
+                "Prompt".to_string()
+            } else {
+                format!("Prompt — {} chars", app.editor.text.chars().count())
+            };
+            if app.running {
+                theme::panel(&title)
+            } else {
+                theme::panel_accent(&title)
+            }
+        }),
         chunks[2],
     );
     frame.render_widget(
@@ -1898,6 +2031,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
             ("^L", "sessions"),
             ("^W", "workflows"),
             ("^T", "tasks"),
+            ("F1", "help"),
         ])))
         .alignment(Alignment::Center),
         chunks[3],
@@ -2176,6 +2310,12 @@ fn render(frame: &mut Frame<'_>, app: &App) {
             .block(theme::panel_warning("Permission required")),
             modal,
         );
+    }
+    if !app.running && app.permission.is_none() && app.editor.text.trim_start().starts_with('/') {
+        crate::tui_palette::render_palette(frame, chunks[2], &app.editor.text);
+    }
+    if app.show_help {
+        crate::tui_palette::render_help(frame, area);
     }
 }
 
@@ -2498,6 +2638,7 @@ mod tests {
         let mut app = App::new(TuiOptions {
             session_id: None,
             verify: false,
+            full_access: false,
             initial_model: ModelSpec::Fake,
             available_models: vec![ModelSpec::Fake],
         });
@@ -2537,6 +2678,7 @@ mod tests {
             let mut app = App::new(TuiOptions {
                 session_id: None,
                 verify: false,
+                full_access: false,
                 initial_model: ModelSpec::Fake,
                 available_models: vec![ModelSpec::Fake],
             });
@@ -2588,6 +2730,11 @@ mod tests {
         );
         assert_eq!(parse_tui_command("/models".into()), TuiCommand::Models);
         assert_eq!(parse_tui_command("/model".into()), TuiCommand::Models);
+        assert_eq!(parse_tui_command("/help".into()), TuiCommand::Help);
+        assert_eq!(parse_tui_command("/keys".into()), TuiCommand::Help);
+        assert_eq!(parse_tui_command("/export".into()), TuiCommand::Export);
+        assert_eq!(parse_tui_command("/clear".into()), TuiCommand::Clear);
+        assert_eq!(parse_tui_command("/new".into()), TuiCommand::Clear);
         assert_eq!(
             parse_tui_command("/model openai/test".into()),
             TuiCommand::Model("openai/test".into())
@@ -2682,6 +2829,7 @@ mod tests {
         let mut app = App::new(TuiOptions {
             session_id: None,
             verify: false,
+            full_access: false,
             initial_model: ModelSpec::Fake,
             available_models: vec![ModelSpec::Fake, openai.clone()],
         });

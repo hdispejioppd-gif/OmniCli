@@ -58,7 +58,7 @@ struct Cli {
     #[arg(long, global = true)]
     profile: Option<String>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -67,6 +67,8 @@ enum Command {
         prompt: String,
         #[arg(long)]
         session: Option<String>,
+        #[arg(long, alias = "yolo")]
+        full_access: bool,
         #[arg(long)]
         allow_write: bool,
         #[arg(long)]
@@ -117,6 +119,8 @@ enum Command {
     Tui {
         #[arg(long)]
         session: Option<String>,
+        #[arg(long, alias = "yolo")]
+        full_access: bool,
         #[arg(long)]
         allow_write: bool,
         #[arg(long)]
@@ -139,6 +143,12 @@ enum Command {
     Context {
         #[command(subcommand)]
         command: ContextCommand,
+    },
+    Init {
+        #[arg(long)]
+        force: bool,
+        #[arg(long, help = "write to global config dir instead of workspace")]
+        global: bool,
     },
     Models,
     Tools,
@@ -372,7 +382,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.apply_profile(profile)?;
     }
     config.validate()?;
-    if cli.worktree.is_some() && matches!(&cli.command, Command::Supervisor { .. }) {
+    if cli.worktree.is_some() && matches!(&cli.command, Some(Command::Supervisor { .. })) {
         return Err("--worktree cannot be combined with supervisor".into());
     }
     if let Some(name) = cli.worktree.as_deref() {
@@ -385,7 +395,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     config.workspace = canonicalize_boundary(&config.workspace);
     config.data_dir = canonicalize_boundary(&config.data_dir);
-    match cli.command {
+    // Bare `omni` opens the interactive TUI, like codex/pi/claude.
+    match cli.command.unwrap_or(Command::Tui {
+        session: None,
+        full_access: false,
+        allow_write: false,
+        allow_shell: false,
+        verify: false,
+        allow_worktree: false,
+        allow_mcp_start: false,
+        allow_mcp_call: false,
+        allow_plugins: false,
+    }) {
         Command::Context {
             command: ContextCommand::Map,
         } => {
@@ -523,6 +544,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "api_key_env": config.openai_compatible.api_key_env,
                 }));
             }
+            for (name, custom) in &config.custom_providers {
+                if custom.base_url.is_empty() || custom.model.is_empty() {
+                    continue;
+                }
+                models.push(serde_json::json!({
+                    "selector": format!("{name}/{}", custom.model),
+                    "provider": "custom",
+                    "model": custom.model,
+                    "base_url": custom.base_url,
+                    "api_key_env": custom.api_key_env,
+                }));
+            }
             if cli.json {
                 println!("{}", serde_json::to_string(&models)?);
             } else {
@@ -643,6 +676,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Tui {
             session,
+            full_access,
             allow_write,
             allow_shell,
             verify,
@@ -654,7 +688,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if cli.json {
                 return Err("--json cannot be used with tui".into());
             }
-            let openai_model = ModelSpec::OpenAiCompatible {
+            let allow_write = allow_write || full_access;
+            let allow_shell = allow_shell || full_access;
+            let allow_worktree = allow_worktree || full_access;
+            let allow_mcp_start = allow_mcp_start || full_access;
+            let allow_mcp_call = allow_mcp_call || full_access;
+            let allow_plugins = allow_plugins || full_access;
+            let openai_model = ModelSpec::OpenAi {
                 base_url: config.openai.base_url.clone(),
                 model: config.openai.model.clone(),
                 timeout: std::time::Duration::from_secs(config.openai.timeout_seconds),
@@ -687,6 +727,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 model: config.openai_compatible.model.clone(),
                 timeout: std::time::Duration::from_secs(config.openai_compatible.timeout_seconds),
             };
+            let custom_models: Vec<ModelSpec> = config
+                .custom_providers
+                .iter()
+                .map(|(name, custom)| ModelSpec::Custom {
+                    name: name.clone(),
+                    base_url: custom.base_url.clone(),
+                    model: custom.model.clone(),
+                    timeout: std::time::Duration::from_secs(custom.timeout_seconds),
+                    api_key_env: custom.api_key_env.clone(),
+                })
+                .collect();
             let initial_model = match config.provider {
                 ProviderKind::Fake => ModelSpec::Fake,
                 ProviderKind::OpenAi => openai_model.clone(),
@@ -760,14 +811,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 TuiOptions {
                     session_id: session,
                     verify,
+                    full_access,
                     initial_model,
-                    available_models: vec![
-                        ModelSpec::Fake,
-                        openai_model,
-                        anthropic_model,
-                        ollama_model,
-                        openai_compatible_model,
-                    ],
+                    available_models: {
+                        let mut models = vec![
+                            ModelSpec::Fake,
+                            openai_model,
+                            anthropic_model,
+                            ollama_model,
+                            lm_studio_model,
+                            llama_cpp_model,
+                            openai_compatible_model,
+                        ];
+                        models.extend(custom_models);
+                        models
+                    },
                 },
             )
             .await?;
@@ -978,6 +1036,43 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Command::Init { force, global } => {
+            let path = if global {
+                let dir = &config.data_dir;
+                fs::create_dir_all(dir)?;
+                dir.join("omni.toml")
+            } else {
+                config.workspace.join("omni.toml")
+            };
+            if path.exists() && !force {
+                return Err(format!(
+                    "{} already exists (pass --force to overwrite)",
+                    path.display()
+                )
+                .into());
+            }
+            let template = r##"# omni.toml — omni CLI configuration
+# Full reference: docs/providers.md — check your setup with `omni doctor`.
+
+# [openai]
+# model = "gpt-4.1-mini"
+
+# Any OpenAI-compatible endpoint, Kilo Code style:
+# [custom_providers.openrouter]
+# base_url = "https://openrouter.ai/api/v1"
+# model = "anthropic/claude-sonnet-4"
+# api_key_env = "OPENROUTER_API_KEY"
+
+# Keyless local server (vLLM, LM Studio, llama.cpp, ...):
+# [custom_providers.vllm]
+# base_url = "http://localhost:8000/v1"
+# model = "qwen2.5-coder"
+"##;
+            if let Err(error) = std::fs::write(&path, template) {
+                return Err(format!("failed to write {}: {error}", path.display()).into());
+            }
+            println!("wrote {}", path.display());
+        }
         Command::Doctor => {
             let provider = match config.provider {
                 ProviderKind::Fake => "fake",
@@ -1037,6 +1132,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "database": config.database_path(),
                 "workspace": config.workspace,
                 "tools": ["apply_patch", "create_file", "git_diff", "git_status", "git_worktree_create", "git_worktree_inspect", "git_worktree_list", "git_worktree_remove", "read_file", "run_checks", "search_files", "shell"],
+                "custom_providers": config.custom_providers.iter().map(|(name, custom)| serde_json::json!({
+                    "name": name.clone(),
+                    "model": custom.model.clone(),
+                    "api_key_present": custom.api_key_env.is_empty() || std::env::var_os(&custom.api_key_env).is_some(),
+                })).collect::<Vec<_>>(),
                 "mcp_servers_configured": config.mcp.servers.len(),
                 "plugins_configured": config.plugins.len(),
             });
@@ -1049,6 +1149,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::Run {
             prompt,
             session,
+            full_access,
             allow_write,
             allow_shell,
             verify,
@@ -1057,6 +1158,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             allow_mcp_call,
             allow_plugins,
         } => {
+            let allow_write = allow_write || full_access;
+            let allow_shell = allow_shell || full_access;
+            let allow_worktree = allow_worktree || full_access;
+            let allow_mcp_start = allow_mcp_start || full_access;
+            let allow_mcp_call = allow_mcp_call || full_access;
+            let allow_plugins = allow_plugins || full_access;
             execute_run(
                 &config,
                 cli.json,

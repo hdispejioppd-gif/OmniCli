@@ -14,13 +14,15 @@ static THEMES: LazyLock<syntect::highlighting::ThemeSet> =
 
 /// Render markdown into ratatui `Line`s with styling.
 ///
-/// - Headings: bold + theme accent colors (h1 blue, h2 purple, h3 cyan)
+/// - Headings: bold + theme accent colors with `◆ ◇ ›` glyphs
 /// - Inline code: theme surface background, amber foreground
 /// - Fenced code blocks: syntect highlight using "base16-ocean.dark"
-/// - Lists: "  • " for bullets, "  1. " for ordered
+/// - Lists: " • " for bullets, " 1. " for ordered, "☐ / ☑" for task lists
+/// - Tables: `│`-separated cells with a bold header row
+/// - Horizontal rules: dim `───` divider
 /// - Bold / Italic / Strikethrough
 /// - Blockquote: prefix "▌ ", muted italic
-pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
+pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
     let theme = &THEMES.themes["base16-ocean.dark"];
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -29,6 +31,7 @@ pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
     let mut code_block_lang: Option<String> = None;
     let mut code_buf = String::new();
     let mut list_stack: Vec<Option<u64>> = Vec::new();
+    let rule_width = width.saturating_sub(2).clamp(8, 60) as usize;
 
     fn top_style(stack: &[Style]) -> Style {
         stack.last().copied().unwrap_or_default()
@@ -39,18 +42,19 @@ pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
 
     let parser = Parser::new_ext(
         input,
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS,
     );
 
     for event in parser {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                let color = match level {
-                    HeadingLevel::H1 => theme::ACCENT,
-                    HeadingLevel::H2 => theme::ACCENT_ALT,
-                    _ => theme::INFO,
+                let (color, glyph) = match level {
+                    HeadingLevel::H1 => (theme::ACCENT, "◆ "),
+                    HeadingLevel::H2 => (theme::ACCENT_ALT, "◇ "),
+                    _ => (theme::INFO, "› "),
                 };
                 style_stack.push(Style::default().fg(color).add_modifier(Modifier::BOLD));
+                current.push(Span::styled(glyph, Style::default().fg(color)));
             }
             Event::End(TagEnd::Heading(_)) => {
                 style_stack.pop();
@@ -73,24 +77,50 @@ pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
                         .find_syntax_by_token(&lang)
                         .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
                     let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
-                    for line_str in code_buf.lines() {
-                        let spans: Vec<Span> = match highlighter.highlight_line(line_str, &SYNTAXES)
-                        {
-                            Ok(segments) => segments
-                                .into_iter()
-                                .map(|(style, text)| {
-                                    Span::styled(
-                                        text.to_string(),
-                                        Style::default()
-                                            .fg(syntect_to_ratatui(style.foreground))
-                                            .bg(syntect_to_ratatui(style.background)),
-                                    )
-                                })
-                                .collect(),
-                            Err(_) => vec![Span::raw(line_str.to_string())],
-                        };
-                        lines.push(Line::from(spans));
+                    let label = if lang.is_empty() {
+                        "code".to_string()
+                    } else {
+                        lang.clone()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled("  ╭─ ", theme::table_border()),
+                        Span::styled(
+                            label,
+                            Style::default()
+                                .fg(theme::ACCENT_ALT)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" ─", theme::table_border()),
+                    ]));
+                    let width = if code_buf.lines().count() >= 100 {
+                        3
+                    } else {
+                        2
+                    };
+                    for (index, line_str) in code_buf.lines().enumerate() {
+                        let spans: Vec<Span<'static>> =
+                            match highlighter.highlight_line(line_str, &SYNTAXES) {
+                                Ok(segments) => segments
+                                    .into_iter()
+                                    .map(|(style, text)| {
+                                        Span::styled(
+                                            text.to_string(),
+                                            Style::default()
+                                                .fg(syntect_to_ratatui(style.foreground))
+                                                .bg(syntect_to_ratatui(style.background)),
+                                        )
+                                    })
+                                    .collect(),
+                                Err(_) => vec![Span::raw(line_str.to_string())],
+                            };
+                        let mut row: Vec<Span<'static>> = vec![Span::styled(
+                            format!("  {index:>width$} │ ", index = index + 1, width = width),
+                            Style::default().fg(theme::TEXT_DIM),
+                        )];
+                        row.extend(spans);
+                        lines.push(Line::from(row));
                     }
+                    lines.push(Line::from(Span::styled("  ╰─", theme::table_border())));
                 }
                 code_buf.clear();
                 code_block_lang = None;
@@ -157,6 +187,60 @@ pub fn render_markdown(input: &str, _width: u16) -> Vec<Line<'static>> {
                     }
                 }
             }
+            Event::TaskListMarker(checked) => {
+                current.push(Span::styled(
+                    if checked { "☑ " } else { "☐ " },
+                    Style::default().fg(if checked {
+                        theme::SUCCESS
+                    } else {
+                        theme::TEXT_DIM
+                    }),
+                ));
+            }
+            Event::Rule => {
+                lines.push(Line::from(Span::styled(
+                    "─".repeat(rule_width),
+                    theme::table_border(),
+                )));
+                lines.push(Line::default());
+            }
+            Event::Start(Tag::Table(_)) => {
+                if !current.is_empty() {
+                    let line = flush_line(&mut current);
+                    lines.push(line);
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                lines.push(Line::default());
+            }
+            Event::Start(Tag::TableHead) => {
+                style_stack.push(
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+            Event::End(TagEnd::TableHead) => {
+                style_stack.pop();
+                current.push(Span::styled("│", theme::table_border()));
+                let line = flush_line(&mut current);
+                lines.push(line);
+                lines.push(Line::from(Span::styled(
+                    "─".repeat(rule_width),
+                    theme::table_border(),
+                )));
+            }
+            Event::End(TagEnd::TableRow) => {
+                current.push(Span::styled("│", theme::table_border()));
+                let line = flush_line(&mut current);
+                lines.push(line);
+            }
+            Event::Start(Tag::TableCell) => {
+                current.push(Span::styled("│ ", theme::table_border()));
+            }
+            Event::End(TagEnd::TableCell) => {
+                current.push(Span::raw(" "));
+            }
             Event::Start(Tag::Strikethrough) => {
                 style_stack.push(top_style(&style_stack).add_modifier(Modifier::CROSSED_OUT));
             }
@@ -191,6 +275,13 @@ fn syntect_to_ratatui(color: syntect::highlighting::Color) -> Color {
 mod tests {
     use super::*;
 
+    fn plain_text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect::<String>()
+    }
+
     #[test]
     fn heading_is_bold() {
         let lines = render_markdown("# Hi", 80);
@@ -215,6 +306,24 @@ mod tests {
     }
 
     #[test]
+    fn code_block_has_frame_and_line_numbers() {
+        let md = "```rust\nfn main() {}\n```";
+        let lines = render_markdown(md, 80);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(text.iter().any(|l| l.contains("╭─ rust")));
+        assert!(text.iter().any(|l| l.contains(" 1 │ ")));
+        assert!(text.iter().any(|l| l.contains("╰─")));
+    }
+
+    #[test]
     fn list_bullets() {
         let md = "- a\n- b";
         let lines = render_markdown(md, 80);
@@ -230,10 +339,37 @@ mod tests {
     #[test]
     fn plain_text_passthrough() {
         let lines = render_markdown("hello world", 80);
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<String>();
-        assert!(text.contains("hello world"));
+        assert!(plain_text(&lines).contains("hello world"));
+    }
+
+    #[test]
+    fn horizontal_rule_renders_divider() {
+        let lines = render_markdown("above\n\n---\n\nbelow", 40);
+        assert!(plain_text(&lines).contains('─'));
+    }
+
+    #[test]
+    fn task_list_markers_render() {
+        let md = "- [x] done\n- [ ] todo";
+        let lines = render_markdown(md, 40);
+        let text = plain_text(&lines);
+        assert!(text.contains('☑'));
+        assert!(text.contains('☐'));
+    }
+
+    #[test]
+    fn table_renders_cells() {
+        let md = "| a | b |\n| --- | --- |\n| 1 | 2 |";
+        let lines = render_markdown(md, 40);
+        let text = plain_text(&lines);
+        assert!(text.contains('│'));
+        assert!(text.contains('1'));
+        assert!(text.contains('2'));
+    }
+
+    #[test]
+    fn heading_has_glyph() {
+        let lines = render_markdown("# Title", 80);
+        assert!(plain_text(&lines).contains('◆'));
     }
 }

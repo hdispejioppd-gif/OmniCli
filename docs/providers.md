@@ -74,3 +74,41 @@ n_predict = -1
 ## `openai-compatible`
 
 Generic OpenAI-compatible адаптер. Базовый URL, модель и env-переменная API-ключа настраиваются в конфиге.
+
+## Кастомные провайдеры (`custom_providers`)
+
+Как в Kilo Code: можно добавить сколько угодно OpenAI-compatible эндпоинтов —
+OpenRouter, DeepSeek, Groq, Together, vLLM, свой прокси — каждый со своим
+именем, URL, моделью и API-ключом.
+
+В `omni.toml`:
+
+```toml
+[custom_providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-sonnet-4"
+timeout_seconds = 120
+api_key_env = "OPENROUTER_API_KEY"
+
+[custom_providers.deepseek]
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[custom_providers.vllm]
+base_url = "http://localhost:8000/v1"
+model = "qwen2.5-coder"
+# api_key_env можно не указывать — для локальных серверов ключ не нужен
+```
+
+- `api_key_env` — имя переменной окружения, в которой лежит ключ. Если пустое,
+  Authorization-заголовок не отправляется (удобно для локальных серверов).
+- Каждый провайдер появляется в TUI: `Ctrl+P` / `/models`; переключение —
+  `/model openrouter/anthropic/claude-sonnet-4`.
+- `omni models` (и `omni models --json`) показывает кастомные провайдеры вместе
+  со встроенными.
+- Профили могут переопределять весь набор `custom_providers` целиком.
+
+## Быстрый старт
+
+`omni init` создаёт заготовку `omni.toml` в рабочей папке (все строки закомментированы — раскомментируй нужное, `--force` перезапишет). `omni doctor` показывает активный провайдер, наличие ключей и все настроенные кастом-провайдеры.

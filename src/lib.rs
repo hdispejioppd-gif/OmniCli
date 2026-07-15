@@ -18,7 +18,9 @@ pub mod supervisor;
 pub mod theme;
 pub mod tools;
 pub mod tui;
+pub mod tui_banner;
 pub mod tui_markdown;
+pub mod tui_palette;
 pub mod workflow;
 pub mod worktree;
 

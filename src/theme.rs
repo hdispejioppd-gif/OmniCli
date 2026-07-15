@@ -107,3 +107,13 @@ pub fn panel_warning(title: &str) -> Block<'static> {
         .title(format!(" {title} "))
         .title_style(Style::default().fg(WARNING).add_modifier(Modifier::BOLD))
 }
+
+/// Keyboard keys rendered inside overlays (e.g. the F1 help).
+pub fn kbd() -> Style {
+    Style::default().fg(INFO).add_modifier(Modifier::BOLD)
+}
+
+/// Dim borders for markdown tables and horizontal rules.
+pub fn table_border() -> Style {
+    Style::default().fg(BORDER)
+}
